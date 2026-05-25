@@ -11,4 +11,5 @@ build/
 htmlcov/
 .pytest_cache/
 *.core
+core.*
 *.log
