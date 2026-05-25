@@ -15,6 +15,7 @@ Tool surface:
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional
 
@@ -41,6 +42,7 @@ mcp = FastMCP(
 
 _CONTAINER_ACTIONS = {"start", "stop", "restart", "pause", "unpause", "remove"}
 _STACK_ACTIONS = {"start", "stop", "restart", "deploy"}
+_SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-\.]*$")
 
 
 def _tool_error(tool: str, err: Exception) -> dict:
@@ -91,10 +93,8 @@ async def list_containers(environment_id: Optional[str] = None) -> dict:
     """
     client = get_client()
     try:
-        path = "/api/containers"
-        if environment_id:
-            path += f"?environmentId={environment_id}"
-        resp, duration = await _timed_get(client, path)
+        params = {"environmentId": environment_id} if environment_id else {}
+        resp, duration = await _timed_get(client, "/api/containers", params=params)
         data = resp.json()
         containers = data if isinstance(data, list) else data.get("containers", [])
         total = len(containers)
@@ -121,10 +121,8 @@ async def list_stacks(environment_id: Optional[str] = None) -> dict:
     """
     client = get_client()
     try:
-        path = "/api/stacks"
-        if environment_id:
-            path += f"?environmentId={environment_id}"
-        resp, duration = await _timed_get(client, path)
+        params = {"environmentId": environment_id} if environment_id else {}
+        resp, duration = await _timed_get(client, "/api/stacks", params=params)
         data = resp.json()
         stacks = data if isinstance(data, list) else data.get("stacks", [])
         log.info("list_stacks", total=len(stacks), duration_s=round(duration, 3))
@@ -179,6 +177,8 @@ async def container_action(container_id: str, action: str) -> dict:
     """
     if action not in _CONTAINER_ACTIONS:
         return {"error": f"action must be one of: {', '.join(sorted(_CONTAINER_ACTIONS))}"}
+    if not _SAFE_ID.match(container_id):
+        return {"error": f"Invalid container_id: {container_id!r}"}
 
     client = get_client()
     try:
@@ -220,6 +220,8 @@ async def stack_action(stack_name: str, action: str) -> dict:
     """
     if action not in _STACK_ACTIONS:
         return {"error": f"action must be one of: {', '.join(sorted(_STACK_ACTIONS))}"}
+    if not _SAFE_ID.match(stack_name):
+        return {"error": f"Invalid stack_name: {stack_name!r}"}
 
     client = get_client()
     try:
@@ -278,6 +280,9 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
         container_id: Container ID from list_containers.
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV if set.
     """
+    if not _SAFE_ID.match(container_id):
+        return {"error": f"Invalid container_id: {container_id!r}"}
+
     client = get_client()
     try:
         env_id = environment_id or client.default_env_id()
