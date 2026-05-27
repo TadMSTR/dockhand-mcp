@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.1] — 2026-05-27
+
+### Fixed
+
+- **Observability: stderr routing** — `configure_logging()` was using
+  `structlog.PrintLoggerFactory()` which routes to `sys.stdout`. Switched to
+  `structlog.stdlib.LoggerFactory()` with an explicit `sys.stderr` stream handler.
+- **Observability: default log path** — `LOG_FILE` was opt-in (defaulted to `""`).
+  Now baked in: `/opt/appdata/dockhand-mcp/logs/dockhand-mcp.log`.
+- **Observability: bare LOG_FILE guard** — added `if log_dir:` guard before
+  `os.makedirs` to prevent `FileNotFoundError` on bare filenames.
+
+### Added
+
+- OTEL tracing support (opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`) with silent failure
+  when `opentelemetry` packages are absent.
+- `[otel]` optional dep group: `opentelemetry-sdk>=1.20`,
+  `opentelemetry-exporter-otlp-proto-grpc>=1.20`.
+
 ## [0.1.0] — 2026-05-25
 
 ### Added
