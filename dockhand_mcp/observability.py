@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any, Optional
 
 import structlog
@@ -16,33 +17,78 @@ import structlog
 
 def configure_logging() -> None:
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    log_file = os.environ.get("LOG_FILE", "")
+    log_file = os.environ.get("LOG_FILE", "/opt/appdata/dockhand-mcp/logs/dockhand-mcp.log")
 
-    processors = [
-        structlog.contextvars.merge_contextvars,
-        structlog.processors.add_log_level,
+    shared_processors = [
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.JSONRenderer(),
+        structlog.processors.StackInfoRenderer(),
     ]
 
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    stderr_handler: logging.Handler = logging.StreamHandler(sys.stderr)
+    handlers: list[logging.Handler] = [stderr_handler]
     if log_file:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
         handlers.append(logging.FileHandler(log_file))
 
-    logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
-        handlers=handlers,
-        format="%(message)s",
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    for h in handlers:
+        root_logger.addHandler(h)
+    root_logger.setLevel(getattr(logging, log_level, logging.INFO))
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.JSONRenderer(),
+        ],
+        foreign_pre_chain=shared_processors,
     )
+    for h in handlers:
+        h.setFormatter(formatter)
 
     structlog.configure(
-        processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, log_level, logging.INFO)
-        ),
+        processors=[
+            *shared_processors,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# OTEL tracing (opt-in)
+# ---------------------------------------------------------------------------
+
+_tracer = None
+
+
+def get_tracer():
+    global _tracer
+    if _tracer is not None:
+        return _tracer
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
+        return None
+    try:
+        from opentelemetry import trace  # type: ignore
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # type: ignore
+        from opentelemetry.sdk.resources import Resource  # type: ignore
+        from opentelemetry.sdk.trace import TracerProvider  # type: ignore
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore
+
+        resource = Resource.create({"service.name": "dockhand-mcp"})
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        trace.set_tracer_provider(provider)
+        _tracer = trace.get_tracer("dockhand-mcp")
+    except Exception:
+        structlog.get_logger().warning("otel_init_failed", exc_info=True)
+    return _tracer
 
 
 _influx_client = None
