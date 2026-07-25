@@ -9,7 +9,13 @@
 //                                   (required in http mode; >= 16 chars)
 //   OTEL_EXPORTER_OTLP_ENDPOINT   — SigNoz OTLP gRPC endpoint (enables tracing)
 //   INFLUXDB_URL / INFLUXDB_TOKEN — InfluxDB metrics (enables emit_metric points)
-//   NATS_URL                      — NATS server (enables dockhand.tool.* events)
+//
+// NATS_URL is intentionally NOT wired through: forge's NATS server requires
+// per-agent user auth (~/.claude-secrets/nats-agent-users.env) and no
+// NATS_AGENT_DOCKHAND_PASSWORD has been provisioned yet. Passing the bare
+// shared NATS_URL causes an infinite reconnect loop ("Authorization
+// Violation") since nats.connect() gets no credentials. Re-add once a
+// dedicated user exists server-side.
 //
 // The endpoint listens on 127.0.0.1:8505/mcp only; scoped-mcp fronts it via
 // `url:` + `Authorization: Bearer ${DOCKHAND_MCP_BEARER}`. Do not expose the port.
@@ -58,7 +64,7 @@ for (const key of [
   "OTEL_EXPORTER_OTLP_ENDPOINT",
   "INFLUXDB_URL",
   "INFLUXDB_TOKEN",
-  "NATS_URL",
+  // NATS_URL deliberately excluded — see note above.
 ]) {
   if (sharedEnv[key]) env[key] = sharedEnv[key];
 }
