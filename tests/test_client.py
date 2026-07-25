@@ -214,6 +214,24 @@ async def test_poll_job_waits_for_done(mock_env):
 
 
 @pytest.mark.asyncio
+async def test_poll_job_rejects_malformed_job_id(mock_env):
+    """A job id that isn't a plain identifier is refused before any request is
+    made — it must not be interpolated into the /api/jobs/{id} URL path."""
+    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        route = mock.get(url__regex=r".*").mock(
+            return_value=httpx.Response(200, json={"status": "done", "result": {}})
+        )
+
+        client = DockhandClient()
+        result = await client.poll_job("../../secret")
+
+        assert route.call_count == 0
+        assert result["success"] is False
+        assert "malformed job id" in result["error"]
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_poll_job_timeout_returns_failure(mock_env):
     """poll_job returns a synthetic failure (not a hang) if the job never finishes."""
     with respx.mock(base_url=ENDPOINT) as mock:

@@ -46,6 +46,10 @@ _SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-\.]*$")
 
 
 def _tool_error(tool: str, err: Exception) -> dict:
+    # SECURITY[accepted]: OE-02 — returns Dockhand's own error text to the calling
+    # agent. Loopback-only service, trusted forge-agent callers, no secrets or
+    # stack traces in the message. Accepted 2026-07-25 (audit
+    # dockhand-mcp-env-param-fix; same class as memsearch-mcp / nextcloud-mcp).
     log.error("tool_error", tool=tool, error=str(err))
     return {"error": str(err)}
 

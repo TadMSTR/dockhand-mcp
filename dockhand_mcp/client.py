@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from typing import Any, Optional, Union
 
 import httpx
 import structlog
+
+# Dockhand job ids are UUIDs; validate before interpolating into a URL path so a
+# malformed value can't redirect the authenticated GET to another endpoint.
+_JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 log = structlog.get_logger(__name__)
 
@@ -107,6 +112,11 @@ class DockhandClient:
         On timeout, returns a synthetic failure result carrying the last status so
         the caller never blocks indefinitely or reports a false success.
         """
+        if not _JOB_ID.match(str(job_id)):
+            return {
+                "success": False,
+                "error": f"malformed job id {str(job_id)[:64]!r}; refusing to poll",
+            }
         deadline = time.monotonic() + timeout
         last_status = "unknown"
         while True:

@@ -43,6 +43,15 @@
   plus `resolve_env` and `poll_job` unit tests. These cover the gap that let the
   env-param bug ship green (the old suite mocked only the HTTP client).
 
+### Security
+
+- Resolves the prior query-param-injection finding (env sent via f-string): env is now
+  `int()`-cast in `resolve_env()` and passed via httpx's typed `params={"env": …}`.
+- `poll_job()` validates the Dockhand-sourced `jobId` against `^[A-Za-z0-9][A-Za-z0-9_.-]*$`
+  before interpolating it into the `/api/jobs/{id}` path (defense-in-depth; audit IV-15).
+- Error passthrough to the calling agent (OE-02) reviewed and accepted for this loopback-only
+  service with trusted agent callers — see `accepted-risks.md` in the build report.
+
 ### Notes
 
 - Runtime on forge stays broken until `DOCKHAND_DEFAULT_ENV="1"` is added to the
