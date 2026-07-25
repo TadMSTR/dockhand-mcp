@@ -1,23 +1,21 @@
 """
-Tests for DockhandClient — auth injection, error handling, action routing.
+Tests for DockhandClient — auth injection, error handling, env resolution,
+and async job polling.
 """
 
+import httpx
 import pytest
 import respx
-import httpx
 
-from dockhand_mcp.client import DockhandClient, DockhandError, DockhandConfigError
+from dockhand_mcp.client import DockhandClient, DockhandConfigError, DockhandError
 
 from .conftest import (
-    ENDPOINT,
     API_TOKEN,
+    ENDPOINT,
     HEALTH_RESPONSE,
-    CONTAINERS_RESPONSE,
-    JOB_RESPONSE,
-    ACTIVITY_RESPONSE,
-    SCAN_RESPONSE,
+    JOB_DONE_FAILURE,
+    JOB_DONE_SUCCESS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Auth injection
@@ -44,7 +42,7 @@ async def test_bearer_token_sent_on_post(mock_env):
     """POST requests include Authorization: Bearer <token>."""
     with respx.mock(base_url=ENDPOINT) as mock:
         route = mock.post("/api/containers/check-updates").mock(
-            return_value=httpx.Response(200, json=JOB_RESPONSE)
+            return_value=httpx.Response(200, json={"jobId": "j1"})
         )
 
         client = DockhandClient()
@@ -93,113 +91,141 @@ async def test_5xx_raises_dockhand_error(mock_env):
 
 
 @pytest.mark.asyncio
-async def test_error_with_details_field(mock_env):
-    """Error responses with 'details' field include details in the message."""
+async def test_error_with_message_field(mock_env):
+    """Dockhand 500s use a 'message' field (e.g. the empty-body deploy error)."""
     with respx.mock(base_url=ENDPOINT) as mock:
-        mock.post("/api/containers/abc/update").mock(
+        mock.post("/api/stacks/x/deploy").mock(
             return_value=httpx.Response(
-                500,
-                json={"error": "Failed to update container", "details": "No environment specified"},
+                500, json={"message": "Unexpected end of JSON input", "code": "INTERNAL_ERROR"}
             )
         )
 
         client = DockhandClient()
         with pytest.raises(DockhandError) as exc_info:
-            await client.post("/api/containers/abc/update")
+            await client.post("/api/stacks/x/deploy")
 
-        assert "No environment specified" in str(exc_info.value)
+        assert "Unexpected end of JSON input" in str(exc_info.value)
         await client.close()
 
 
+# ---------------------------------------------------------------------------
+# Environment resolution (arg -> DOCKHAND_DEFAULT_ENV -> error)
+# ---------------------------------------------------------------------------
+
 @pytest.mark.asyncio
-async def test_missing_env_raises_config_error(monkeypatch):
-    """Missing DOCKHAND_DEFAULT_ENV raises DockhandConfigError when accessed."""
+async def test_resolve_env_uses_default(mock_env):
+    """resolve_env falls back to DOCKHAND_DEFAULT_ENV and returns an int."""
+    client = DockhandClient()
+    assert client.resolve_env() == 1
+    assert client.resolve_env(None) == 1
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_resolve_env_arg_overrides_default(mock_env):
+    """An explicit environment_id argument wins over the default."""
+    client = DockhandClient()
+    assert client.resolve_env("2") == 2
+    assert client.resolve_env(3) == 3
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_resolve_env_missing_raises_config_error(monkeypatch):
+    """No arg and no DOCKHAND_DEFAULT_ENV raises DockhandConfigError."""
     monkeypatch.setenv("DOCKHAND_ENDPOINT", ENDPOINT)
     monkeypatch.setenv("DOCKHAND_API_TOKEN", API_TOKEN)
     monkeypatch.delenv("DOCKHAND_DEFAULT_ENV", raising=False)
 
     client = DockhandClient()
     with pytest.raises(DockhandConfigError) as exc_info:
-        client.default_env_id()
-
+        client.resolve_env()
     assert "DOCKHAND_DEFAULT_ENV" in str(exc_info.value)
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_resolve_env_non_integer_raises_config_error(monkeypatch):
+    """A non-integer environment id raises DockhandConfigError."""
+    monkeypatch.setenv("DOCKHAND_ENDPOINT", ENDPOINT)
+    monkeypatch.setenv("DOCKHAND_API_TOKEN", API_TOKEN)
+    monkeypatch.setenv("DOCKHAND_DEFAULT_ENV", "forge")  # not an int
+
+    client = DockhandClient()
+    with pytest.raises(DockhandConfigError) as exc_info:
+        client.resolve_env()
+    assert "integer" in str(exc_info.value)
+    await client.close()
+
+
 # ---------------------------------------------------------------------------
-# Container action routing
+# Async job polling
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_container_remove_uses_delete(mock_env):
-    """container_action 'remove' uses DELETE, not POST."""
-    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
-        delete_route = mock.delete("/api/containers/abc123").mock(
-            return_value=httpx.Response(200, json={"status": "ok"})
-        )
-        post_route = mock.post("/api/containers/abc123/remove").mock(
-            return_value=httpx.Response(200, json={})
+async def test_poll_job_returns_success_result(mock_env):
+    """poll_job returns the terminal result dict for a done+success job."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get(f"/api/jobs/{JOB_DONE_SUCCESS['id']}").mock(
+            return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
 
         client = DockhandClient()
-        await client.delete("/api/containers/abc123")
+        result = await client.poll_job(JOB_DONE_SUCCESS["id"])
 
-        assert delete_route.call_count == 1
-        assert post_route.call_count == 0
+        assert result["success"] is True
+        assert "Started" in result["output"]
         await client.close()
 
 
 @pytest.mark.asyncio
-async def test_container_start_uses_post(mock_env):
-    """container_action 'start' uses POST /api/containers/{id}/start."""
+async def test_poll_job_returns_failure_result(mock_env):
+    """poll_job surfaces a done+failure job's error rather than a false success."""
     with respx.mock(base_url=ENDPOINT) as mock:
-        route = mock.post("/api/containers/abc123/start").mock(
-            return_value=httpx.Response(200, json=JOB_RESPONSE)
+        mock.get(f"/api/jobs/{JOB_DONE_FAILURE['id']}").mock(
+            return_value=httpx.Response(200, json=JOB_DONE_FAILURE)
         )
 
         client = DockhandClient()
-        resp = await client.post("/api/containers/abc123/start")
+        result = await client.poll_job(JOB_DONE_FAILURE["id"])
 
-        assert route.call_count == 1
-        assert resp.json() == JOB_RESPONSE
-        await client.close()
-
-
-# ---------------------------------------------------------------------------
-# Scan and update body
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_scan_sends_image_name(mock_env):
-    """scan_image sends {'imageName': ...} in the request body."""
-    import json
-
-    with respx.mock(base_url=ENDPOINT) as mock:
-        route = mock.post("/api/images/scan").mock(
-            return_value=httpx.Response(200, json=SCAN_RESPONSE)
-        )
-
-        client = DockhandClient()
-        await client.post("/api/images/scan", json={"imageName": "nginx:latest"})
-
-        body = json.loads(route.calls[0].request.content)
-        assert body["imageName"] == "nginx:latest"
+        assert result["success"] is False
+        assert "Failed to restart" in result["error"]
         await client.close()
 
 
 @pytest.mark.asyncio
-async def test_update_container_sends_env_id(mock_env):
-    """update_container sends environmentId in the request body."""
-    import json
-
+async def test_poll_job_waits_for_done(mock_env):
+    """poll_job keeps polling while status is running, then returns the result."""
     with respx.mock(base_url=ENDPOINT) as mock:
-        route = mock.post("/api/containers/abc123/update").mock(
-            return_value=httpx.Response(200, json=JOB_RESPONSE)
+        running = {"id": JOB_DONE_SUCCESS["id"], "status": "running", "lines": []}
+        mock.get(f"/api/jobs/{JOB_DONE_SUCCESS['id']}").mock(
+            side_effect=[
+                httpx.Response(200, json=running),
+                httpx.Response(200, json=JOB_DONE_SUCCESS),
+            ]
         )
 
         client = DockhandClient()
-        await client.post("/api/containers/abc123/update", json={"environmentId": 1})
+        result = await client.poll_job(JOB_DONE_SUCCESS["id"], interval=0.01)
 
-        body = json.loads(route.calls[0].request.content)
-        assert body["environmentId"] == 1
+        assert result["success"] is True
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_poll_job_timeout_returns_failure(mock_env):
+    """poll_job returns a synthetic failure (not a hang) if the job never finishes."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get(f"/api/jobs/{JOB_DONE_SUCCESS['id']}").mock(
+            return_value=httpx.Response(200, json={"id": JOB_DONE_SUCCESS["id"], "status": "running"})
+        )
+
+        client = DockhandClient()
+        result = await client.poll_job(
+            JOB_DONE_SUCCESS["id"], timeout=0.0, interval=0.01
+        )
+
+        assert result["success"] is False
+        assert "did not complete" in result["error"]
         await client.close()

@@ -11,10 +11,10 @@ Provides MCP tools to inspect, control, and update Docker containers and stacks 
 - `get_health` — Dockhand service health check.
 - `list_containers` — All containers with status.
 - `list_stacks` — All Compose stacks.
-- `container_action(id, action)` — start / stop / restart / pause / unpause / remove.
-- `stack_action(id, action)` — start / stop / restart / deploy.
-- `check_updates` — Check for available image updates.
-- `update_container(id)` — Pull and recreate a container with a newer image.
+- `container_action(id, action, environment_id=None)` — start / stop / restart / pause / unpause / remove.
+- `stack_action(name, action, environment_id=None)` — start / stop / restart / deploy (async; waits for the job).
+- `check_updates(environment_id=None)` — Check for available image updates.
+- `update_container(id, environment_id=None)` — Pull and recreate a container with a newer image (async; waits for the job).
 - `scan_image(image)` — Security scan an image.
 - `get_activity` — Recent Dockhand activity log.
 
@@ -41,18 +41,21 @@ pyproject.toml
 
 ## Configuration
 
-| Env var          | Required | Purpose                              |
-|------------------|----------|--------------------------------------|
-| `DOCKHAND_URL`   | Yes      | Dockhand base URL                    |
-| `DOCKHAND_TOKEN` | No       | Basic or Bearer auth token           |
-| `LOG_LEVEL`      | No       | Logging verbosity (default: INFO)    |
-| `LOG_FILE`       | No       | Log file path (default: stderr only) |
-| `INFLUXDB_URL`   | No       | InfluxDB endpoint for metrics        |
+| Env var                | Required | Purpose                                                        |
+|------------------------|----------|----------------------------------------------------------------|
+| `DOCKHAND_ENDPOINT`    | Yes      | Dockhand base URL (e.g. `http://localhost:7777`)               |
+| `DOCKHAND_API_TOKEN`   | Yes      | Bearer auth token (Dockhand UI → Settings → API Tokens)        |
+| `DOCKHAND_DEFAULT_ENV` | Effectively yes | Default environment id for the `?env=` query param      |
+| `LOG_LEVEL`            | No       | Logging verbosity (default: INFO)                              |
+| `LOG_FILE`             | No       | Log file path (default: stderr only)                          |
+| `INFLUXDB_URL`         | No       | InfluxDB endpoint for metrics                                 |
 
 ## Key architecture decisions
 
 - **Input validation before API calls** — container and stack IDs are validated against `_SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-\.]*$")` before being sent to Dockhand. Do not relax this regex.
 - **`DockhandError` / `DockhandConfigError`** — `client.py` raises these typed exceptions. Tool handlers catch them and return structured error responses rather than letting exceptions propagate.
+- **Environment resolution** — every Dockhand endpoint reads the environment from a `?env=<int>` query param and silently returns `[]` (or fails the async job) when it is missing. `DockhandClient.resolve_env(environment_id)` centralises the `arg → DOCKHAND_DEFAULT_ENV → DockhandConfigError` precedence; all list/action tools call it and pass `params={"env": ...}`. Never send env in a JSON body — the handlers ignore it there.
+- **Async job polling** — stack actions and `update_container` return `{"jobId": ...}` and run in the background. `DockhandClient.poll_job()` polls `GET /api/jobs/{jobId}` to a terminal state and returns `{success, output|error}`; `server._finalize_job()` wires this into the tools so callers get a real verdict, not an opaque handle. `deploy` additionally requires a JSON body (`{pull, build, forceRecreate}`) or the handler 500s.
 
 ## Testing
 

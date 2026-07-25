@@ -43,6 +43,41 @@ Gives an AI agent structured access to Docker container and stack management on 
 | `deploy` | POST | `/api/stacks/{name}/deploy` |
 
 `deploy` pulls new images and recreates the stack (equivalent to `docker compose up -d --pull`).
+`deploy` sends a JSON body `{"pull": true, "build": false, "forceRecreate": false}`; the other
+stack actions send no body.
+
+## Environments
+
+Every Dockhand REST endpoint resolves the target environment from a `?env=<int>` query
+parameter (parsed with `parseInt`). List endpoints **silently return an empty array** (HTTP
+200, no error) when it is absent, and action jobs fail asynchronously with
+`No environment specified`. To avoid that failure mode, every list and action tool resolves
+the environment as:
+
+```
+explicit environment_id argument  →  DOCKHAND_DEFAULT_ENV  →  clear DockhandConfigError
+```
+
+`list_containers`, `list_stacks`, `container_action`, `stack_action`, `check_updates`, and
+`update_container` all accept an optional `environment_id`. In practice set
+`DOCKHAND_DEFAULT_ENV` once (see [Getting the Environment ID](#getting-the-environment-id))
+and omit the argument.
+
+## Asynchronous actions
+
+Stack actions (`start`/`stop`/`restart`/`deploy`) and `update_container` run **asynchronously**
+in Dockhand: the endpoint returns `{"jobId": ...}` immediately and the work completes in the
+background. These tools **wait for the job to finish** — polling `GET /api/jobs/{jobId}` — and
+return the terminal result:
+
+```json
+{ "jobId": "…", "success": true,  "output": " Container searxng Started \n" }
+{ "jobId": "…", "success": false, "error":  "Failed to restart compose stack" }
+```
+
+So a returned `success: false` is a real failure, not a queued job you have to chase down.
+`check_updates` is fire-and-forget: it returns the `jobId`; use `get_activity` / `list_containers`
+to observe completion.
 
 ## Update Workflow
 
@@ -68,7 +103,7 @@ To update a container to its latest image:
 |----------|----------|---------|---------|
 | `DOCKHAND_ENDPOINT` | yes | — | Base URL, e.g. `http://localhost:7777` |
 | `DOCKHAND_API_TOKEN` | yes | — | Bearer token from Dockhand UI (Settings → API Tokens) |
-| `DOCKHAND_DEFAULT_ENV` | no | — | Default environment ID (e.g. `1`). Required for `update_container` if not passed explicitly |
+| `DOCKHAND_DEFAULT_ENV` | **effectively yes** | — | Default Dockhand environment ID (e.g. `1`). Used by every list and action tool as the `?env=` query param when the caller doesn't pass one. Without it (and no explicit `environment_id`), those tools return a clear config error. See [Environments](#environments) |
 | `LOG_LEVEL` | no | `INFO` | structlog verbosity |
 | `LOG_FILE` | no | — | Log to file path; stdout if unset |
 | `INFLUXDB_URL` | no | — | Enables InfluxDB telemetry when set |

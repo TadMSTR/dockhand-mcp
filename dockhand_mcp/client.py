@@ -7,8 +7,10 @@ All requests use Authorization: Bearer <DOCKHAND_API_TOKEN>.
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import Any, Optional
+import time
+from typing import Any, Optional, Union
 
 import httpx
 import structlog
@@ -60,13 +62,67 @@ class DockhandClient:
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"}
 
-    def default_env_id(self) -> str:
-        if not self._default_env:
+    def resolve_env(self, environment_id: Union[str, int, None] = None) -> int:
+        """Resolve the Dockhand environment id to an int for the ``?env=`` query param.
+
+        Precedence: explicit ``environment_id`` arg → ``DOCKHAND_DEFAULT_ENV``.
+        Every Dockhand REST endpoint reads the environment from ``?env=<int>``
+        (parsed with ``parseInt``) and silently returns an empty result — or fails
+        the async job — when it is absent. Resolving it here, and raising a clear
+        error when neither source is set, prevents that silent-empty failure mode.
+
+        Raises:
+            DockhandConfigError: if no environment id can be resolved, or the
+                resolved value is not an integer.
+        """
+        raw: Union[str, int, None] = (
+            environment_id if environment_id not in (None, "") else self._default_env
+        )
+        if raw in (None, ""):
             raise DockhandConfigError(
-                "DOCKHAND_DEFAULT_ENV is required for this operation. "
-                "Set it to the Dockhand environment ID (e.g. '1')."
+                "No Dockhand environment resolved. Pass environment_id or set "
+                "DOCKHAND_DEFAULT_ENV to the Dockhand environment ID (e.g. '1'). "
+                "Without it, Dockhand returns an empty result and jobs fail with "
+                "'No environment specified'."
             )
-        return self._default_env
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            raise DockhandConfigError(
+                f"Invalid Dockhand environment id {raw!r}: must be an integer "
+                "(e.g. '1'). Check DOCKHAND_DEFAULT_ENV or the environment_id argument."
+            )
+
+    async def poll_job(
+        self, job_id: str, *, timeout: float = 120.0, interval: float = 1.0
+    ) -> dict:
+        """Poll ``GET /api/jobs/{job_id}`` until the job reaches a terminal state.
+
+        Dockhand action endpoints (stack deploy/start/stop/restart, container
+        update) return ``{"jobId": ...}`` immediately and run asynchronously. The
+        job record accumulates ``lines`` and, when finished, exposes a terminal
+        ``result`` of ``{"success": bool, "output"|"error": str}``. This polls that
+        record and returns the ``result`` dict.
+
+        On timeout, returns a synthetic failure result carrying the last status so
+        the caller never blocks indefinitely or reports a false success.
+        """
+        deadline = time.monotonic() + timeout
+        last_status = "unknown"
+        while True:
+            resp = await self.get(f"/api/jobs/{job_id}")
+            data = resp.json()
+            last_status = data.get("status", last_status)
+            if last_status in ("done", "complete", "completed", "error", "failed"):
+                return data.get("result", {}) or {}
+            if time.monotonic() >= deadline:
+                return {
+                    "success": False,
+                    "error": f"job {job_id} did not complete within {timeout:.0f}s "
+                    f"(last status: {last_status})",
+                    "status": last_status,
+                }
+            await asyncio.sleep(interval)
 
     async def get(self, path: str, **kwargs: Any) -> httpx.Response:
         resp = await self._http.get(path, headers=self._auth_headers(), **kwargs)

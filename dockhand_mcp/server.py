@@ -62,6 +62,22 @@ async def _timed_post(client: DockhandClient, path: str, **kwargs: Any):
     return resp, time.perf_counter() - t0
 
 
+async def _finalize_job(client: DockhandClient, data: dict) -> dict:
+    """If ``data`` carries a Dockhand ``jobId``, poll the job to completion and
+    return its terminal result merged with the job id; otherwise return ``data``.
+
+    Dockhand runs stack/container actions asynchronously and returns only a job
+    handle. Polling here means the tool returns a real ``{success, output|error}``
+    verdict instead of an opaque id the caller cannot interpret — the silent
+    "job queued but failed" gap that masked the missing-env bug.
+    """
+    job_id = data.get("jobId") if isinstance(data, dict) else None
+    if not job_id:
+        return data
+    result = await client.poll_job(job_id)
+    return {"jobId": job_id, **result}
+
+
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
@@ -89,12 +105,12 @@ async def list_containers(environment_id: Optional[str] = None) -> dict:
     Returns container name, image, status, and environment for each container.
 
     Args:
-        environment_id: Filter by environment ID (optional; defaults to all environments).
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
     """
     client = get_client()
     try:
-        params = {"environmentId": environment_id} if environment_id else {}
-        resp, duration = await _timed_get(client, "/api/containers", params=params)
+        env = client.resolve_env(environment_id)
+        resp, duration = await _timed_get(client, "/api/containers", params={"env": env})
         data = resp.json()
         containers = data if isinstance(data, list) else data.get("containers", [])
         total = len(containers)
@@ -117,12 +133,12 @@ async def list_stacks(environment_id: Optional[str] = None) -> dict:
     Returns stack name, status, and container count for each stack.
 
     Args:
-        environment_id: Filter by environment ID (optional; defaults to all environments).
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
     """
     client = get_client()
     try:
-        params = {"environmentId": environment_id} if environment_id else {}
-        resp, duration = await _timed_get(client, "/api/stacks", params=params)
+        env = client.resolve_env(environment_id)
+        resp, duration = await _timed_get(client, "/api/stacks", params={"env": env})
         data = resp.json()
         stacks = data if isinstance(data, list) else data.get("stacks", [])
         log.info("list_stacks", total=len(stacks), duration_s=round(duration, 3))
@@ -163,7 +179,9 @@ async def get_activity(limit: int = 20, offset: int = 0) -> dict:
 # ---------------------------------------------------------------------------
 
 @mcp.tool
-async def container_action(container_id: str, action: str) -> dict:
+async def container_action(
+    container_id: str, action: str, environment_id: Optional[str] = None
+) -> dict:
     """Perform a lifecycle action on a Docker container.
 
     Actions: start, stop, restart, pause, unpause, remove.
@@ -174,6 +192,7 @@ async def container_action(container_id: str, action: str) -> dict:
     Args:
         container_id: Container ID from list_containers.
         action: One of: start, stop, restart, pause, unpause, remove.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
     """
     if action not in _CONTAINER_ACTIONS:
         return {"error": f"action must be one of: {', '.join(sorted(_CONTAINER_ACTIONS))}"}
@@ -182,11 +201,16 @@ async def container_action(container_id: str, action: str) -> dict:
 
     client = get_client()
     try:
+        env = client.resolve_env(environment_id)
         t0 = time.perf_counter()
         if action == "remove":
-            resp = await client.delete(f"/api/containers/{container_id}")
+            resp = await client.delete(
+                f"/api/containers/{container_id}", params={"env": env}
+            )
         else:
-            resp = await client.post(f"/api/containers/{container_id}/{action}")
+            resp = await client.post(
+                f"/api/containers/{container_id}/{action}", params={"env": env}
+            )
         duration = time.perf_counter() - t0
 
         data = resp.json() if resp.content else {"status": "ok"}
@@ -207,16 +231,23 @@ async def container_action(container_id: str, action: str) -> dict:
 
 
 @mcp.tool
-async def stack_action(stack_name: str, action: str) -> dict:
+async def stack_action(
+    stack_name: str, action: str, environment_id: Optional[str] = None
+) -> dict:
     """Perform a lifecycle action on a Docker Compose stack.
 
     Actions: start, stop, restart, deploy.
     'deploy' pulls new images and recreates the stack (equivalent to docker compose up -d --pull).
     Use list_stacks to see available stack names.
 
+    Dockhand runs the action asynchronously; this tool waits for the job to
+    finish and returns its result: {jobId, success, output} on success or
+    {jobId, success: false, error} on failure.
+
     Args:
         stack_name: Stack name from list_stacks.
         action: One of: start, stop, restart, deploy.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
     """
     if action not in _STACK_ACTIONS:
         return {"error": f"action must be one of: {', '.join(sorted(_STACK_ACTIONS))}"}
@@ -225,14 +256,24 @@ async def stack_action(stack_name: str, action: str) -> dict:
 
     client = get_client()
     try:
+        env = client.resolve_env(environment_id)
+        # deploy's handler calls request.json() and 500s on an empty body;
+        # start/stop/restart take no body.
+        body = (
+            {"pull": True, "build": False, "forceRecreate": False}
+            if action == "deploy"
+            else None
+        )
         resp, duration = await _timed_post(
-            client, f"/api/stacks/{stack_name}/{action}"
+            client, f"/api/stacks/{stack_name}/{action}", params={"env": env}, json=body
         )
         data = resp.json() if resp.content else {"status": "ok"}
+        data = await _finalize_job(client, data)
         log.info(
             "stack_action",
             stack=stack_name,
             action=action,
+            success=data.get("success"),
             duration_s=round(duration, 3),
         )
         await emit_metric(
@@ -246,16 +287,23 @@ async def stack_action(stack_name: str, action: str) -> dict:
 
 
 @mcp.tool
-async def check_updates() -> dict:
+async def check_updates(environment_id: Optional[str] = None) -> dict:
     """Queue an image update check for all containers.
 
     Dockhand checks whether newer image tags are available for running containers.
     Returns a job ID — use get_activity to see when it completes.
     After completion, list_containers will show which containers have updates available.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+            Without it the queued job resolves to 'No environment specified'.
     """
     client = get_client()
     try:
-        resp, duration = await _timed_post(client, "/api/containers/check-updates")
+        env = client.resolve_env(environment_id)
+        resp, duration = await _timed_post(
+            client, "/api/containers/check-updates", params={"env": env}
+        )
         data = resp.json()
         job_id = data.get("jobId", "")
         log.info("check_updates", job_id=job_id, duration_s=round(duration, 3))
@@ -278,26 +326,29 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
 
     Args:
         container_id: Container ID from list_containers.
-        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV if set.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
     """
     if not _SAFE_ID.match(container_id):
         return {"error": f"Invalid container_id: {container_id!r}"}
 
     client = get_client()
     try:
-        env_id = environment_id or client.default_env_id()
+        env = client.resolve_env(environment_id)
+        # env is a query param (?env=); the handler also requires a JSON body
+        # ({repullImage, startAfterUpdate}) and 500s on an empty body.
         resp, duration = await _timed_post(
             client,
             f"/api/containers/{container_id}/update",
-            json={"environmentId": int(env_id)},
+            params={"env": env},
+            json={"repullImage": True, "startAfterUpdate": True},
         )
-        data = resp.json()
-        job_id = data.get("jobId", "")
+        data = resp.json() if resp.content else {"status": "ok"}
+        data = await _finalize_job(client, data)
         log.info(
             "update_container",
             container_id=container_id[:12],
-            env_id=env_id,
-            job_id=job_id,
+            env_id=env,
+            success=data.get("success"),
             duration_s=round(duration, 3),
         )
         await emit_metric(
