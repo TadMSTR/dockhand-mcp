@@ -75,10 +75,11 @@ def configure_logging() -> None:
 # ---------------------------------------------------------------------------
 
 _tracer = None
+_provider = None
 
 
 def get_tracer():
-    global _tracer
+    global _tracer, _provider
     if _tracer is not None:
         return _tracer
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -97,10 +98,35 @@ def get_tracer():
         provider = TracerProvider(resource=resource)
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
         trace.set_tracer_provider(provider)
+        _provider = provider
         _tracer = trace.get_tracer("dockhand-mcp")
     except Exception:
         structlog.get_logger().warning("otel_init_failed", exc_info=True)
     return _tracer
+
+
+async def shutdown_observability() -> None:
+    """Flush and release telemetry backends on process shutdown.
+
+    Under the long-lived HTTP service this runs from the FastMCP lifespan on
+    stop, so the OTel ``BatchSpanProcessor`` exports any buffered spans and the
+    NATS connection drains cleanly instead of being torn down mid-flush (the
+    per-turn-subprocess failure mode this migration fixes). All best-effort —
+    shutdown must never raise.
+    """
+    global _nats_client
+    if _provider is not None:
+        try:
+            _provider.shutdown()  # flushes BatchSpanProcessor then exits exporter
+        except Exception:
+            structlog.get_logger().warning("otel_shutdown_failed", exc_info=True)
+    if _nats_client is not None:
+        try:
+            await _nats_client.drain()
+        except Exception:
+            structlog.get_logger().warning("nats_shutdown_failed", exc_info=True)
+        finally:
+            _nats_client = None
 
 
 _influx_client = None
@@ -172,3 +198,42 @@ async def emit_metric(
             await nats_client.publish(subject, payload.encode())
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Tool-call tracing middleware
+# ---------------------------------------------------------------------------
+
+from fastmcp.server.middleware import Middleware, MiddlewareContext  # noqa: E402
+
+
+class ToolTracingMiddleware(Middleware):
+    """Wrap every MCP tool call in an OTel span named ``dockhand.tool.<name>``.
+
+    A no-op when no tracer is configured (``OTEL_EXPORTER_OTLP_ENDPOINT`` unset),
+    so it is always safe to register. This is the piece that makes tool calls
+    actually appear as spans in SigNoz — ``get_tracer()`` builds the exporter but
+    nothing emitted spans before this.
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        tracer = get_tracer()
+        if tracer is None:
+            return await call_next(context)
+        tool_name = getattr(context.message, "name", "unknown")
+        with tracer.start_as_current_span(f"dockhand.tool.{tool_name}") as span:
+            try:
+                span.set_attribute("mcp.tool.name", tool_name)
+            except Exception:
+                pass
+            try:
+                return await call_next(context)
+            except Exception as exc:
+                try:
+                    span.record_exception(exc)
+                    from opentelemetry.trace import Status, StatusCode  # type: ignore
+
+                    span.set_status(Status(StatusCode.ERROR, str(exc)))
+                except Exception:
+                    pass
+                raise

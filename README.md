@@ -104,6 +104,11 @@ To update a container to its latest image:
 | `DOCKHAND_ENDPOINT` | yes | — | Base URL, e.g. `http://localhost:7777` |
 | `DOCKHAND_API_TOKEN` | yes | — | Bearer token from Dockhand UI (Settings → API Tokens) |
 | `DOCKHAND_DEFAULT_ENV` | **effectively yes** | — | Default Dockhand environment ID (e.g. `1`). Used by every list and action tool as the `?env=` query param when the caller doesn't pass one. Without it (and no explicit `environment_id`), those tools return a clear config error. See [Environments](#environments) |
+| `MCP_TRANSPORT` | no | `stdio` | `stdio` for local dev; `http` for the long-lived PM2 service. See [Deployment](#deployment-forge-pm2) |
+| `DOCKHAND_MCP_HTTP_HOST` | no | `127.0.0.1` | Bind host in `http` mode. Loopback-only — startup refuses a non-loopback host |
+| `DOCKHAND_MCP_HTTP_PORT` | no | `8505` | Bind port in `http` mode |
+| `DOCKHAND_MCP_HTTP_PATH` | no | `/mcp` | MCP endpoint path in `http` mode |
+| `DOCKHAND_MCP_BEARER` | **yes in `http` mode** | — | Bearer token the HTTP endpoint requires (≥ 16 chars). scoped-mcp presents it as `Authorization: Bearer`. Startup refuses `http` mode without it |
 | `LOG_LEVEL` | no | `INFO` | structlog verbosity |
 | `LOG_FILE` | no | — | Log to file path; stdout if unset |
 | `INFLUXDB_URL` | no | — | Enables InfluxDB telemetry when set |
@@ -114,6 +119,11 @@ To update a container to its latest image:
 | `NATS_SUBJECT_PREFIX` | no | `dockhand` | NATS subject prefix |
 
 ## Deployment (forge, PM2)
+
+dockhand-mcp runs as a **single long-lived HTTP service** under PM2, bound to
+`127.0.0.1:8505/mcp` and fronted by scoped-mcp via `url:` (the memsearch-mcp pattern).
+Running it as a persistent process — rather than a per-turn stdio subprocess — is what lets
+its OTel/InfluxDB/NATS telemetry actually flush and centralizes logs under `pm2 logs`.
 
 ```bash
 # Clone
@@ -126,13 +136,40 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
-# Create API token in Dockhand UI: Settings → API Tokens
-# Add DOCKHAND_API_TOKEN to ~/.secrets/forge.env
+# Secrets in ~/.secrets/forge.env (injected via --env-file, never in the repo):
+#   DOCKHAND_API_TOKEN   — Dockhand API token (UI: Settings → API Tokens)
+#   DOCKHAND_MCP_BEARER  — token scoped-mcp presents to THIS endpoint (>= 16 chars).
+#                          Generate: python3 -c "import secrets; print(secrets.token_hex(32))"
+#   OTEL_EXPORTER_OTLP_ENDPOINT / INFLUXDB_URL / INFLUXDB_TOKEN / NATS_URL — telemetry (optional)
 
-# Start (secrets injected via --env-file)
+# Start (ecosystem.config.js sets MCP_TRANSPORT=http and binds 127.0.0.1:8505)
 pm2 start ecosystem.config.js --env-file ~/.secrets/forge.env
 pm2 save
+
+# Verify: listening loopback-only, unauth rejected, bearer accepted
+ss -tlnp | grep 127.0.0.1:8505
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8505/mcp   # 401
 ```
+
+**scoped-mcp cutover** (sysadmin) — point the manifest at the HTTP service instead of spawning
+a subprocess:
+
+```yaml
+dockhand-mcp:
+  type: mcp_proxy
+  config:
+    url: http://localhost:8505/mcp
+    headers:
+      Authorization: "Bearer ${DOCKHAND_MCP_BEARER}"
+```
+
+HITL gating on `container_action` / `stack_action` / `update_container` is applied by scoped-mcp
+by tool name and is unaffected by the transport change.
+
+### Local development (stdio)
+
+Leave `MCP_TRANSPORT` unset (defaults to `stdio`) to run the historical per-turn subprocess mode
+directly under an MCP client — no bearer or port needed.
 
 ## Getting the Environment ID
 
@@ -159,6 +196,12 @@ pytest --cov=dockhand_mcp
 | InfluxDB telemetry | off | `INFLUXDB_URL` |
 | OTEL traces | off | `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | NATS publishing | off | `NATS_URL` |
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, every tool call is wrapped in a span named
+`dockhand.tool.<name>` (via a FastMCP middleware) and exported to the collector; spans and NATS
+events flush on the long-lived HTTP process and are drained cleanly on shutdown. Under the old
+per-turn stdio subprocess the batch exporters were torn down before flushing, so telemetry never
+arrived — running as a PM2 HTTP service is what makes it observable.
 
 ## Verified API Paths
 

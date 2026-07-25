@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.0] — 2026-07-25
+
+### Added
+
+- **HTTP transport for a long-lived PM2 service.** `MCP_TRANSPORT=http` runs the server as a
+  persistent HTTP service on `127.0.0.1:8505/mcp` (configurable via
+  `DOCKHAND_MCP_HTTP_HOST`/`_PORT`/`_PATH`), fronted by scoped-mcp via `url:`. `stdio` remains the
+  default for local dev. This is the change that makes telemetry observable — a per-turn stdio
+  subprocess tore down the OTel `BatchSpanProcessor` and NATS connection before they could flush.
+- **Bearer auth on the HTTP endpoint.** In `http` mode a `DOCKHAND_MCP_BEARER` token
+  (`StaticTokenVerifier`) is required; unauthenticated requests are rejected (401). Startup
+  fails closed if the transport is `http` and the token is missing, shorter than 16 chars, or the
+  bind host is non-loopback.
+- **Per-tool OTel spans.** A FastMCP middleware wraps every tool call in a
+  `dockhand.tool.<name>` span (no-op unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set). Previously
+  `get_tracer()` built the exporter but nothing ever emitted a span, so SigNoz stayed empty.
+- **Graceful telemetry shutdown.** A server lifespan flushes the tracer provider, drains the NATS
+  connection, and closes the httpx client on stop.
+
+### Changed
+
+- **`ecosystem.config.js` rewritten to the working HTTP form.** Runs the venv interpreter with
+  `MCP_TRANSPORT=http`, binds `127.0.0.1:8505`, sets `LOG_FILE`/rotation-friendly PM2 log paths,
+  and documents the secrets/telemetry endpoints supplied via `--env-file ~/.secrets/forge.env`.
+  The previous file launched the stdio server under PM2 with no client on stdin — it would
+  restart-loop.
+
 ## [0.2.0] — 2026-07-25
 
 ### Fixed

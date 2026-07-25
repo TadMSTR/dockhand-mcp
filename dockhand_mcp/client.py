@@ -174,3 +174,16 @@ def get_client() -> DockhandClient:
     if _client is None:
         _client = DockhandClient()
     return _client
+
+
+async def close_client() -> None:
+    """Close the shared client if one was created, and reset the singleton.
+
+    Called from the server lifespan on shutdown so the httpx connection pool is
+    released cleanly. No-op when no tool ever built a client (so it never forces
+    a client — and its required-env check — during teardown).
+    """
+    global _client
+    if _client is not None:
+        await _client.close()
+        _client = None
