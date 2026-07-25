@@ -15,18 +15,71 @@ Tool surface:
 
 from __future__ import annotations
 
+import os
 import re
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import structlog
 from fastmcp import FastMCP
+from fastmcp.server.auth import StaticTokenVerifier
 
-from .client import DockhandClient, DockhandConfigError, DockhandError, get_client
-from .observability import configure_logging, emit_metric
+from .client import (
+    DockhandClient,
+    DockhandConfigError,
+    DockhandError,
+    close_client,
+    get_client,
+)
+from .observability import (
+    ToolTracingMiddleware,
+    configure_logging,
+    emit_metric,
+    get_tracer,
+    shutdown_observability,
+)
 
 configure_logging()
 log = structlog.get_logger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    # Build the tracer eagerly so the OTLP exporter is ready before the first
+    # tool call (and a misconfigured endpoint surfaces at startup, not mid-call).
+    get_tracer()
+    log.info("dockhand_mcp_started", transport=_TRANSPORT)
+    try:
+        yield
+    finally:
+        await shutdown_observability()
+        await close_client()
+        log.info("dockhand_mcp_stopped")
+
+# --- Transport / endpoint auth configuration ------------------------------
+# stdio (default) keeps the historical per-turn subprocess mode for local dev.
+# http runs the long-lived PM2 service on a loopback port fronted by scoped-mcp.
+_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio")
+_HTTP_HOST = os.environ.get("DOCKHAND_MCP_HTTP_HOST", "127.0.0.1")
+_HTTP_PORT = int(os.environ.get("DOCKHAND_MCP_HTTP_PORT", "8505"))
+_HTTP_PATH = os.environ.get("DOCKHAND_MCP_HTTP_PATH", "/mcp")
+_BEARER = os.environ.get("DOCKHAND_MCP_BEARER", "")
+
+# Hosts treated as loopback for the fail-closed non-loopback guard in main().
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+# A short bearer on a reachable port is trivially brute-forceable and would show
+# up in cleartext in any log that isn't length-gated. Require a real token; a
+# generated secrets.token_hex(32) is 64 chars, well clear of this floor.
+_MIN_BEARER_LENGTH = 16
+
+# Auth is gated on DOCKHAND_MCP_BEARER being set, independent of transport —
+# stdio mode has no HTTP surface so this only takes effect when MCP_TRANSPORT=http.
+_auth = None
+if _BEARER:
+    _auth = StaticTokenVerifier(
+        tokens={_BEARER: {"sub": "scoped-mcp", "client_id": "cli"}}
+    )
 
 mcp = FastMCP(
     name="dockhand",
@@ -38,7 +91,12 @@ mcp = FastMCP(
         "which containers have updates. Use scan_image for CVE scanning before pulling "
         "a new image. Use update_container to pull and recreate a specific container."
     ),
+    auth=_auth,
+    lifespan=_lifespan,
 )
+
+# Emit an OTel span per tool call (no-op until OTEL_EXPORTER_OTLP_ENDPOINT is set).
+mcp.add_middleware(ToolTracingMiddleware())
 
 _CONTAINER_ACTIONS = {"start", "stop", "restart", "pause", "unpause", "remove"}
 _STACK_ACTIONS = {"start", "stop", "restart", "deploy"}
@@ -405,7 +463,33 @@ async def scan_image(image_name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    mcp.run()
+    if _TRANSPORT == "http":
+        if _HTTP_HOST not in _LOOPBACK_HOSTS:
+            raise RuntimeError(
+                f"Refusing to bind dockhand-mcp HTTP transport to non-loopback host "
+                f"{_HTTP_HOST!r}. This service is loopback-only by design; front it "
+                f"with scoped-mcp, do not expose the port."
+            )
+        if not _BEARER:
+            raise RuntimeError(
+                "Refusing to start dockhand-mcp HTTP transport without DOCKHAND_MCP_BEARER "
+                "set. HTTP mode must not run with an unauthenticated, reachable port."
+            )
+        if len(_BEARER) < _MIN_BEARER_LENGTH:
+            raise RuntimeError(
+                f"DOCKHAND_MCP_BEARER is too short ({len(_BEARER)} chars, need "
+                f">= {_MIN_BEARER_LENGTH}). Generate one with: "
+                'python3 -c "import secrets; print(secrets.token_hex(32))"'
+            )
+        log.info(
+            "dockhand_mcp_http_start",
+            host=_HTTP_HOST,
+            port=_HTTP_PORT,
+            path=_HTTP_PATH,
+        )
+        mcp.run(transport="http", host=_HTTP_HOST, port=_HTTP_PORT, path=_HTTP_PATH)
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":
