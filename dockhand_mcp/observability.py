@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 
@@ -29,10 +29,18 @@ def configure_logging() -> None:
     stderr_handler: logging.Handler = logging.StreamHandler(sys.stderr)
     handlers: list[logging.Handler] = [stderr_handler]
     if log_file:
-        log_dir = os.path.dirname(log_file)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file))
+        try:
+            log_dir = os.path.dirname(log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            handlers.append(logging.FileHandler(log_file))
+        except OSError as exc:
+            # An unwritable log path (CI runner, restricted perms) must not crash
+            # startup — fall back to stderr-only logging.
+            print(
+                f"dockhand-mcp: file logging disabled ({log_file}): {exc}",
+                file=sys.stderr,
+            )
 
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
@@ -78,7 +86,9 @@ def get_tracer():
         return None
     try:
         from opentelemetry import trace  # type: ignore
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # type: ignore
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter,  # type: ignore
+        )
         from opentelemetry.sdk.resources import Resource  # type: ignore
         from opentelemetry.sdk.trace import TracerProvider  # type: ignore
         from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore
