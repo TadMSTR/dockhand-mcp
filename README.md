@@ -63,7 +63,7 @@ explicit environment_id argument  →  DOCKHAND_DEFAULT_ENV  →  clear Dockhand
 `DOCKHAND_DEFAULT_ENV` once (see [Getting the Environment ID](#getting-the-environment-id))
 and omit the argument.
 
-## Asynchronous actions
+## Asynchronous Actions
 
 Stack actions (`start`/`stop`/`restart`/`deploy`) and `update_container` run **asynchronously**
 in Dockhand: the endpoint returns `{"jobId": ...}` immediately and the work completes in the
@@ -110,7 +110,7 @@ To update a container to its latest image:
 | `DOCKHAND_MCP_HTTP_PATH` | no | `/mcp` | MCP endpoint path in `http` mode |
 | `DOCKHAND_MCP_BEARER` | **yes in `http` mode** | — | Bearer token the HTTP endpoint requires (≥ 16 chars). scoped-mcp presents it as `Authorization: Bearer`. Startup refuses `http` mode without it |
 | `LOG_LEVEL` | no | `INFO` | structlog verbosity |
-| `LOG_FILE` | no | — | Log to file path; stdout if unset |
+| `LOG_FILE` | no | `/opt/appdata/dockhand-mcp/logs/dockhand-mcp.log` | JSON logs always go to stderr; also written here unless the path is unwritable (falls back to stderr-only) |
 | `INFLUXDB_URL` | no | — | Enables InfluxDB telemetry when set |
 | `INFLUXDB_TOKEN` | no | — | InfluxDB auth token |
 | `INFLUXDB_BUCKET` | no | `dockhand-mcp` | InfluxDB bucket name |
