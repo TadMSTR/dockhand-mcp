@@ -24,7 +24,6 @@ Provides MCP tools to inspect, control, and update Docker containers and stacks 
 dockhand_mcp/
   server.py          FastMCP server — 9 tools
   client.py          DockhandClient — async httpx wrapper, get_client() factory
-  models.py          Pydantic models for API responses
   observability.py   configure_logging() (structlog JSON), emit_metric() (InfluxDB)
 tests/               pytest with respx mocks
 pyproject.toml
@@ -36,7 +35,7 @@ pyproject.toml
 |-----------|------------------------------|
 | fastmcp   | MCP server framework         |
 | httpx     | Async HTTP client            |
-| pydantic  | Response models              |
+| pydantic  | Transitive, via fastmcp — no direct use |
 | structlog | JSON structured logging      |
 
 ## Configuration
@@ -47,7 +46,7 @@ pyproject.toml
 | `DOCKHAND_API_TOKEN`   | Yes      | Bearer auth token (Dockhand UI → Settings → API Tokens)        |
 | `DOCKHAND_DEFAULT_ENV` | Effectively yes | Default environment id for the `?env=` query param      |
 | `LOG_LEVEL`            | No       | Logging verbosity (default: INFO)                              |
-| `LOG_FILE`             | No       | Log file path (default: stderr only)                          |
+| `LOG_FILE`             | No       | Single log sink; stderr only if unwritable or empty            |
 | `INFLUXDB_URL`         | No       | InfluxDB endpoint for metrics                                 |
 
 ## Key architecture decisions

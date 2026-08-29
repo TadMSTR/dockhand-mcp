@@ -50,7 +50,10 @@ const env = {
   // Dockhand backend.
   DOCKHAND_ENDPOINT: 'http://localhost:7777',
   DOCKHAND_DEFAULT_ENV: '1',
-  // Logging (structlog also writes JSON here alongside stderr/PM2).
+  // Logging. As of 0.4.0 this is the SINGLE sink: when LOG_FILE is writable the
+  // stderr handler is not attached, so out_file/error_file below carry only PM2's
+  // own output and genuine uncaught stderr — not a second copy of every log line.
+  // Set LOG_FILE to '' to hand the files to PM2 entirely instead.
   LOG_LEVEL: 'INFO',
   LOG_FILE: '/home/ted/logs/dockhand-mcp.log',
   // Telemetry naming defaults; endpoints + tokens come from forge.env.
@@ -80,7 +83,10 @@ module.exports = {
     watch: false,
     max_restarts: 10,
     restart_delay: 2000,
-    // Centralized logs (rotate with the pm2-logrotate module).
+    // Centralized logs. Rotated by /etc/logrotate.d/forge-logs (daily, rotate 14,
+    // copytruncate) — installed 2026-08-29 for vikunja#574/#571. pm2-logrotate is
+    // NOT installed; the previous comment here claimed rotation that did not exist,
+    // which is how /home/ted/logs reached 598 MB across 1,313 files.
     out_file: '/home/ted/logs/dockhand-mcp.out.log',
     error_file: '/home/ted/logs/dockhand-mcp.err.log',
     merge_logs: true,

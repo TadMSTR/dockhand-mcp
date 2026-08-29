@@ -150,11 +150,16 @@ async def get_health() -> dict:
 
     Returns status 'ok' when Dockhand is running normally.
     """
-    client = get_client()
     try:
+        client = get_client()
         resp, duration = await _timed_get(client, "/api/health")
         data = resp.json()
         log.info("get_health", status=data.get("status"), duration_s=round(duration, 3))
+        await emit_metric(
+            "dockhand_tool",
+            {"tool": "get_health"},
+            {"duration_s": duration, "status": str(data.get("status", ""))},
+        )
         return data
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("get_health", e)
@@ -169,8 +174,8 @@ async def list_containers(environment_id: Optional[str] = None) -> dict:
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
     """
-    client = get_client()
     try:
+        client = get_client()
         env = client.resolve_env(environment_id)
         resp, duration = await _timed_get(client, "/api/containers", params={"env": env})
         data = resp.json()
@@ -197,8 +202,8 @@ async def list_stacks(environment_id: Optional[str] = None) -> dict:
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
     """
-    client = get_client()
     try:
+        client = get_client()
         env = client.resolve_env(environment_id)
         resp, duration = await _timed_get(client, "/api/stacks", params={"env": env})
         data = resp.json()
@@ -222,8 +227,8 @@ async def get_activity(limit: int = 20, offset: int = 0) -> dict:
         limit: Number of events to return (default 20, max 100).
         offset: Pagination offset (default 0).
     """
-    client = get_client()
     try:
+        client = get_client()
         resp, duration = await _timed_get(
             client, f"/api/activity?limit={min(limit, 100)}&offset={offset}"
         )
@@ -231,6 +236,11 @@ async def get_activity(limit: int = 20, offset: int = 0) -> dict:
         events = data.get("events", data) if isinstance(data, dict) else data
         total = data.get("total", len(events)) if isinstance(data, dict) else len(events)
         log.info("get_activity", returned=len(events), total=total, duration_s=round(duration, 3))
+        await emit_metric(
+            "dockhand_tool",
+            {"tool": "get_activity"},
+            {"duration_s": duration, "returned": len(events), "total": total},
+        )
         return data
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("get_activity", e)
@@ -261,8 +271,8 @@ async def container_action(
     if not _SAFE_ID.match(container_id):
         return {"error": f"Invalid container_id: {container_id!r}"}
 
-    client = get_client()
     try:
+        client = get_client()
         env = client.resolve_env(environment_id)
         t0 = time.perf_counter()
         if action == "remove":
@@ -316,8 +326,8 @@ async def stack_action(
     if not _SAFE_ID.match(stack_name):
         return {"error": f"Invalid stack_name: {stack_name!r}"}
 
-    client = get_client()
     try:
+        client = get_client()
         env = client.resolve_env(environment_id)
         # deploy's handler calls request.json() and 500s on an empty body;
         # start/stop/restart take no body.
@@ -326,22 +336,33 @@ async def stack_action(
             if action == "deploy"
             else None
         )
-        resp, duration = await _timed_post(
+        # duration_s must span _finalize_job's poll, not just the initial POST.
+        # Dockhand runs the action asynchronously, so timing only the POST
+        # reported ~0.1 s for calls the OTel span measured at 121-135 s — the
+        # span and the metric disagreed about the same call (vikunja#574 P5).
+        t0 = time.perf_counter()
+        resp, post_duration = await _timed_post(
             client, f"/api/stacks/{stack_name}/{action}", params={"env": env}, json=body
         )
         data = resp.json() if resp.content else {"status": "ok"}
         data = await _finalize_job(client, data)
+        duration = time.perf_counter() - t0
         log.info(
             "stack_action",
             stack=stack_name,
             action=action,
             success=data.get("success"),
             duration_s=round(duration, 3),
+            post_duration_s=round(post_duration, 3),
         )
         await emit_metric(
             "dockhand_tool",
             {"tool": "stack_action", "action": action},
-            {"duration_s": duration, "stack": stack_name},
+            {
+                "duration_s": duration,
+                "post_duration_s": post_duration,
+                "stack": stack_name,
+            },
         )
         return data
     except (DockhandError, DockhandConfigError) as e:
@@ -360,8 +381,8 @@ async def check_updates(environment_id: Optional[str] = None) -> dict:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
             Without it the queued job resolves to 'No environment specified'.
     """
-    client = get_client()
     try:
+        client = get_client()
         env = client.resolve_env(environment_id)
         resp, duration = await _timed_post(
             client, "/api/containers/check-updates", params={"env": env}
@@ -393,12 +414,15 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
     if not _SAFE_ID.match(container_id):
         return {"error": f"Invalid container_id: {container_id!r}"}
 
-    client = get_client()
     try:
+        client = get_client()
         env = client.resolve_env(environment_id)
         # env is a query param (?env=); the handler also requires a JSON body
         # ({repullImage, startAfterUpdate}) and 500s on an empty body.
-        resp, duration = await _timed_post(
+        # See stack_action: the timer must close after _finalize_job, which polls
+        # the async job for up to 120 s (vikunja#574 P5).
+        t0 = time.perf_counter()
+        resp, post_duration = await _timed_post(
             client,
             f"/api/containers/{container_id}/update",
             params={"env": env},
@@ -406,17 +430,23 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
         )
         data = resp.json() if resp.content else {"status": "ok"}
         data = await _finalize_job(client, data)
+        duration = time.perf_counter() - t0
         log.info(
             "update_container",
             container_id=container_id[:12],
             env_id=env,
             success=data.get("success"),
             duration_s=round(duration, 3),
+            post_duration_s=round(post_duration, 3),
         )
         await emit_metric(
             "dockhand_tool",
             {"tool": "update_container"},
-            {"duration_s": duration, "container_id": container_id[:12]},
+            {
+                "duration_s": duration,
+                "post_duration_s": post_duration,
+                "container_id": container_id[:12],
+            },
         )
         return data
     except (DockhandError, DockhandConfigError) as e:
@@ -435,8 +465,8 @@ async def scan_image(image_name: str) -> dict:
     Args:
         image_name: Full image name with tag, e.g. 'nginx:latest', 'postgres:16-alpine'.
     """
-    client = get_client()
     try:
+        client = get_client()
         resp, duration = await _timed_post(
             client,
             "/api/images/scan",

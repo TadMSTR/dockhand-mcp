@@ -29,5 +29,14 @@ jobs:
       - name: Lint (ruff)
         run: ruff check dockhand_mcp tests
 
+      # Floor is 85, against 87% actually achieved on this branch — measured in a
+      # venv installed with `.[dev]` only, i.e. exactly what CI installs, because
+      # the optional influxdb/nats/otel extras are absent here and a number taken
+      # from a fully-provisioned dev venv would not transfer. Deliberately a
+      # measured number with a small margin, not an aspirational one.
       - name: Test (pytest + coverage)
-        run: pytest -q --cov=dockhand_mcp --cov-report=term-missing
+        run: |
+          pytest -q \
+            --cov=dockhand_mcp \
+            --cov-report=term-missing \
+            --cov-fail-under=85

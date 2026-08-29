@@ -44,13 +44,18 @@ class DockhandClient:
     """
 
     def __init__(self) -> None:
+        # DockhandConfigError, not RuntimeError: every tool catches
+        # (DockhandError, DockhandConfigError), so a RuntimeError here escaped the
+        # handler entirely and was never even logged — _tool_error() is what logs,
+        # and it never ran. resolve_env() below was deliberately given this type
+        # for exactly this reason (vikunja#576).
         endpoint = os.environ.get("DOCKHAND_ENDPOINT", "").rstrip("/")
         if not endpoint:
-            raise RuntimeError("DOCKHAND_ENDPOINT is required")
+            raise DockhandConfigError("DOCKHAND_ENDPOINT is required")
 
         self._token = os.environ.get("DOCKHAND_API_TOKEN", "")
         if not self._token:
-            raise RuntimeError("DOCKHAND_API_TOKEN is required")
+            raise DockhandConfigError("DOCKHAND_API_TOKEN is required")
 
         self._default_env = os.environ.get("DOCKHAND_DEFAULT_ENV", "")
 
