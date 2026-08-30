@@ -124,6 +124,12 @@ def get_tracer():
         _provider = provider
         _tracer = trace.get_tracer("dockhand-mcp")
     except Exception:
+        # EXEMPT from the no-exc_info rule the credential-bearing backends follow
+        # (audit 2026-08-29, LOW-1). Two reasons this one keeps its traceback:
+        # OTEL_EXPORTER_OTLP_ENDPOINT is a bare URL with no credential in it, and
+        # the try block above spans five separate imports plus a gRPC exporter
+        # build — `error_class=ImportError` alone would not say *which* failed,
+        # which is the whole diagnostic question when the [otel] extra is missing.
         log.warning("otel_init_failed", exc_info=True)
     return _tracer
 
@@ -142,12 +148,19 @@ async def shutdown_observability() -> None:
         try:
             _provider.shutdown()  # flushes BatchSpanProcessor then exits exporter
         except Exception:
+            # Same exemption as otel_init_failed above: no credential in the OTel
+            # config, and a flush failure is worth a full traceback.
             log.warning("otel_shutdown_failed", exc_info=True)
     if _nats_client is not None:
         try:
             await _nats_client.drain()
-        except Exception:
-            log.warning("nats_shutdown_failed", exc_info=True)
+        except Exception as exc:
+            # NOT exempt (audit 2026-08-29, LOW-1). NATS is the credential-bearing
+            # backend — a NATS URL is nats://user:password@host — so this matches
+            # the discipline of the init/publish warnings: exception class only,
+            # never a rendered traceback that a future nats-py could seed with
+            # connection detail.
+            log.warning("nats_shutdown_failed", error_class=type(exc).__name__)
         finally:
             _nats_client = None
 

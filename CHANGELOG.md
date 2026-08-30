@@ -76,6 +76,23 @@ had been failing silently for 35 days.
   pm2-logrotate module" which was never installed. Rotation is now real, via
   `/etc/logrotate.d/forge-logs` (daily, rotate 14, copytruncate), installed 2026-08-29.
 
+### Security
+
+- **`nats_shutdown_failed` no longer logs a rendered traceback.** Post-audit remediation
+  (2026-08-29, LOW-1): the site carried `exc_info=True`, which is a looser disclosure surface
+  than the five new warnings this release added, in the one file it hardened against exactly
+  that. NATS is the credential-bearing backend — a NATS URL is `nats://user:password@host` —
+  so it now follows the same class-only discipline.
+  The two OTel sites (`otel_init_failed`, `otel_shutdown_failed`) keep `exc_info` **by
+  decision, now documented in-code**: `OTEL_EXPORTER_OTLP_ENDPOINT` carries no credential, and
+  their `try` block spans five imports plus an exporter build, so the traceback answers a
+  question `error_class` alone cannot. A test pins that exemption set at exactly two sites,
+  both `otel_*`, so neither a new `exc_info` on a credential-bearing site nor a silent removal
+  of the exemption can land unnoticed.
+- Filed the long-missing `accepted-risks.md` row for dockhand-mcp's OE-02 disposition
+  (accepted 2026-07-25, recommended by that audit, never written; re-flagged 2026-08-29), and
+  a row accepting the venv's 23 pre-existing transitive CVEs.
+
 ### Removed
 
 - `dockhand_mcp/models.py`. 41 statements, 0% coverage, imported nowhere — the tools return

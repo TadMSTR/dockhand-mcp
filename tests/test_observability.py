@@ -455,7 +455,7 @@ async def test_shutdown_observability_survives_a_failing_drain(monkeypatch, rec_
 
     class _NatsClient:
         async def drain(self):
-            raise OSError("connection already gone")
+            raise OSError(f"connection already gone: {SECRET_URL}")
 
     monkeypatch.setattr(observability, "_nats_client", _NatsClient())
 
@@ -463,6 +463,32 @@ async def test_shutdown_observability_survives_a_failing_drain(monkeypatch, rec_
 
     assert observability._nats_client is None
     assert [e for e, _ in rec_log.warnings] == ["nats_shutdown_failed"]
+    # Audit 2026-08-29 LOW-1: this site carried exc_info=True, which renders the
+    # exception text into the log. NATS is the credential-bearing backend, so it
+    # follows the same class-only discipline as the init/publish warnings. The two
+    # OTel sites keep exc_info deliberately — see the comments in observability.py.
+    assert rec_log.warnings[0][1]["error_class"] == "OSError"
+    text = rec_log.payload_text()
+    assert SECRET_URL not in text
+    assert "sup3rs3cr3t-pw" not in text
+
+
+def test_only_the_otel_sites_are_exempt_from_the_no_exc_info_rule():
+    """Pins the exemption set decided at the 2026-08-29 audit (LOW-1).
+
+    A new `exc_info=True` on any credential-bearing backend's log site — or a
+    silent removal of the OTel exemption — changes this count.
+    """
+    import pathlib
+
+    src = pathlib.Path(observability.__file__).read_text()
+    exempt = [
+        ln.strip()
+        for ln in src.splitlines()
+        if "exc_info=True" in ln
+    ]
+    assert len(exempt) == 2, exempt
+    assert all("otel_" in ln for ln in exempt), exempt
 
 
 # ---------------------------------------------------------------------------
