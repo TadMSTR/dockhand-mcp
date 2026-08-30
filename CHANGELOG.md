@@ -1,5 +1,128 @@
 # Changelog
 
+## [0.4.0] — 2026-08-29
+
+Observability and error-handling hardening. Everything below was a *runtime* defect that
+CI and a code read both passed — the repo was clean at `9231f01` while the deployed service
+had been failing silently for 35 days.
+
+### Fixed
+
+- **A configured-but-failing telemetry backend is now visible, and is not retried per call.**
+  `_get_influx()` and `_get_nats()` caught `Exception` and `pass`ed, leaving the client global
+  at `None`. Two consequences: no log line ever (35 days of logs contained zero lines
+  mentioning influx), and *every* `emit_metric()` call re-entered the connect path — for NATS
+  each attempt spawned another `allow_reconnect=True` background loop that was never closed,
+  which is how one stale env var produced **2,867** `Authorization Violation` lines. Both now
+  log one warning and set a negative-cache sentinel. A backend whose env var is simply *unset*
+  stays silent, as before — that is the intended disabled path. The warning carries the
+  exception class only, never the URL or token; a NATS URL embeds its own credentials.
+  (vikunja#574 P1, #575)
+- **NATS is now connected with fail-fast options, and nats-py's default error callback is
+  replaced.** The sentinel above fixes the per-call re-entry, but that was only half the
+  flood — measured against a refused port, a *single* default `nats.connect()` blocks the
+  calling tool for ~120 s and reports ~60 times before it ever raises, because
+  `_select_next_server()` loops on `max_reconnect_attempts=60` / `reconnect_time_wait=2` and
+  invokes `error_cb` on every attempt. nats-py's default callback logs
+  `nats: encountered error` at **ERROR** on the `nats.aio.client` logger, so demoting that
+  logger to WARNING (below) does not silence it either. Now: `allow_reconnect=False`,
+  `max_reconnect_attempts=1`, `reconnect_time_wait=0`, `connect_timeout=2`, an overall
+  `asyncio.wait_for` deadline, and a warn-once `error_cb` of our own. Measured after the fix:
+  ten `emit_metric()` calls against two dead backends complete in **0.1 s** and produce
+  **three** log lines, against ~120 s and an unbounded flood before.
+  Note `max_reconnect_attempts=0` is a trap, not "no retries" — the discard check is
+  `> 0`, so 0 retries forever.
+- **A broken InfluxDB URL is now visible at all.** `InfluxDBClient3` constructs lazily and
+  does not contact the host, so `_get_influx()` succeeds against an unreachable URL and its
+  init sentinel never fires — verified against `http://127.0.0.1:9/nope`. The warn-once on
+  the *write* path is therefore what actually surfaces a broken InfluxDB; without it this
+  half of the ticket would still be entirely silent.
+- **Missing `DOCKHAND_ENDPOINT`/`DOCKHAND_API_TOKEN` no longer escapes as an unhandled
+  exception.** `DockhandClient.__init__` raised `RuntimeError`, which is not in the
+  `(DockhandError, DockhandConfigError)` tuple the tools catch — and `client = get_client()`
+  sat on the line *before* `try:` in all nine tools, so it was outside the block as well. The
+  error escaped the tool and was never logged, because `_tool_error()` is what logs and it
+  never ran. Now raises `DockhandConfigError` (matching `resolve_env()`, which was
+  deliberately given that type for this reason) and the call moved inside the `try` in all
+  nine tools. (vikunja#576, and the real mechanism behind #126)
+- **`stack_action` and `update_container` reported `duration_s` three orders of magnitude
+  too low.** The timer closed after the initial POST, while `_finalize_job()` then polled the
+  async job for up to 120 s. SigNoz spans measured 121–135 s for calls whose metric field
+  said ~0.1 s — the span and the metric disagreed about the same call. The timer now closes
+  after `_finalize_job()`; the initial-POST latency is retained under the new
+  `post_duration_s` field rather than being dropped. (vikunja#574 P5)
+
+### Changed
+
+- **Third-party loggers are pinned to `WARNING`.** `configure_logging()` set the root logger
+  to `LOG_LEVEL` and never demoted libraries, so `httpx`, `httpcore`, `mcp` and `nats` all
+  logged at INFO into the file (measured: 76 `ListToolsRequest`, 58 `CallToolRequest`, 11
+  httpx request lines, plus the NATS flood). The app's own logger still honours `LOG_LEVEL`.
+  Same fix as scoped-mcp (#554) and task-dispatcher (#552). (vikunja#574 P3)
+- **One log sink, not two.** A stderr `StreamHandler` and a `FileHandler` were both attached,
+  so under PM2 every line was written to `error_file` *and* to `LOG_FILE` — two near-identical
+  files, neither rotating. The file handler now wins when `LOG_FILE` is writable; stderr
+  remains the fallback when it is not, which is what keeps CI and restricted-perms runners
+  alive. (vikunja#574 P4)
+- **`get_health` and `get_activity` now emit metrics** like the other seven tools. Metric
+  coverage was 7 of 9 with no stated reason. (vikunja#574 P6)
+- **A write/publish failure inside `emit_metric()` warns once per process** instead of being
+  swallowed. Unlike an init failure it does not disable the backend — a rejected write is
+  often a transient collector restart — but it is no longer silent. This goes beyond the
+  literal text of the build plan's phase 1, which scoped the fix to `_get_influx()`/
+  `_get_nats()`; see the InfluxDB note above for why that scope was not sufficient.
+- `ecosystem.config.js` and `README.md` corrected: both described the stderr+file
+  double-write as intended, and the ecosystem comment claimed rotation "with the
+  pm2-logrotate module" which was never installed. Rotation is now real, via
+  `/etc/logrotate.d/forge-logs` (daily, rotate 14, copytruncate), installed 2026-08-29.
+
+### Security
+
+- **`nats_shutdown_failed` no longer logs a rendered traceback.** Post-audit remediation
+  (2026-08-29, LOW-1): the site carried `exc_info=True`, which is a looser disclosure surface
+  than the five new warnings this release added, in the one file it hardened against exactly
+  that. NATS is the credential-bearing backend — a NATS URL is `nats://user:password@host` —
+  so it now follows the same class-only discipline.
+  The two OTel sites (`otel_init_failed`, `otel_shutdown_failed`) keep `exc_info` **by
+  decision, now documented in-code**: `OTEL_EXPORTER_OTLP_ENDPOINT` carries no credential, and
+  their `try` block spans five imports plus an exporter build, so the traceback answers a
+  question `error_class` alone cannot. A test pins that exemption set at exactly two sites,
+  both `otel_*`, so neither a new `exc_info` on a credential-bearing site nor a silent removal
+  of the exemption can land unnoticed.
+- Filed the long-missing `accepted-risks.md` row for dockhand-mcp's OE-02 disposition
+  (accepted 2026-07-25, recommended by that audit, never written; re-flagged 2026-08-29), and
+  a row accepting the venv's 23 pre-existing transitive CVEs.
+
+### Removed
+
+- `dockhand_mcp/models.py`. 41 statements, 0% coverage, imported nowhere — the tools return
+  raw dicts and the Pydantic aliases were never applied. Wiring it into the tool return types
+  is a larger change and belongs in its own build.
+
+### Testing
+
+- Coverage **60% → 87%**, and `--cov-fail-under=85` now gates CI. The floor was measured in a
+  venv installed with `.[dev]` only — what CI actually installs — because the optional
+  influx/nats/otel extras are absent there.
+- New `tests/test_observability.py` (the telemetry layer was at 38%) and
+  `tests/test_tool_errors_and_metrics.py`. The optional backends are faked via `sys.modules`
+  rather than imported, so the tests run identically in CI where those extras are absent.
+- The failure-path tests assert both that a warning fired *and* that its payload contains no
+  credential — "no secret in the log" passes trivially against a path that logs nothing.
+
+### Previously unreleased
+
+Three commits landed after the 0.3.0 entry and were never tagged or logged:
+
+- `a1254e1` — stop wiring `NATS_URL` until a dockhand NATS user is provisioned (PR #4).
+  **The commit alone did not resolve the NATS flood.** The removal never reached the running
+  process: PM2 had the variable baked into `dump.pm2`, and `pm2 restart --update-env` can add
+  or overwrite a variable but cannot delete one. It took a `pm2 delete` + `pm2 start` +
+  `pm2 save` (done 2026-08-29) to clear it. A future reader looking at `a1254e1` and the log
+  dates will otherwise conclude the fix simply didn't work.
+- `dd0c99e` — add the Release workflow (tag push → GitHub Release) (PR #5).
+- `9231f01` — fix the `LOG_FILE` default and heading style in the README.
+
 ## [0.3.0] — 2026-07-25
 
 ### Added

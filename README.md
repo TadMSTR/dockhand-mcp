@@ -110,7 +110,7 @@ To update a container to its latest image:
 | `DOCKHAND_MCP_HTTP_PATH` | no | `/mcp` | MCP endpoint path in `http` mode |
 | `DOCKHAND_MCP_BEARER` | **yes in `http` mode** | — | Bearer token the HTTP endpoint requires (≥ 16 chars). scoped-mcp presents it as `Authorization: Bearer`. Startup refuses `http` mode without it |
 | `LOG_LEVEL` | no | `INFO` | structlog verbosity |
-| `LOG_FILE` | no | `/opt/appdata/dockhand-mcp/logs/dockhand-mcp.log` | JSON logs always go to stderr; also written here unless the path is unwritable (falls back to stderr-only) |
+| `LOG_FILE` | no | `/opt/appdata/dockhand-mcp/logs/dockhand-mcp.log` | Single JSON log sink. When this path is writable it is the **only** sink — stderr is not also written. If it is unwritable (or set to empty) logging falls back to stderr-only. Set it to `''` to let PM2 own the files |
 | `INFLUXDB_URL` | no | — | Enables InfluxDB telemetry when set |
 | `INFLUXDB_TOKEN` | no | — | InfluxDB auth token |
 | `INFLUXDB_BUCKET` | no | `dockhand-mcp` | InfluxDB bucket name |
@@ -196,6 +196,24 @@ pytest --cov=dockhand_mcp
 | InfluxDB telemetry | off | `INFLUXDB_URL` |
 | OTEL traces | off | `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | NATS publishing | off | `NATS_URL` |
+
+`httpx`, `httpcore`, `mcp` and `nats` are pinned to `WARNING` regardless of `LOG_LEVEL`, so
+raising `LOG_LEVEL` to `DEBUG` gets you this service's own detail rather than its
+dependencies' wire trace.
+
+**A backend that is configured but failing warns once and is then disabled** for the life of
+the process (`influx_init_failed` / `nats_init_failed`), rather than being retried on every
+tool call. A backend whose env var is simply *unset* is disabled silently — that is the
+intended "off" path. The warning carries the exception class only, never the URL or token:
+a NATS URL embeds its own credentials.
+
+Telemetry is best-effort and must never slow a tool down. NATS is connected with
+`allow_reconnect=False` and a single retry under an overall deadline, and nats-py's default
+error callback — which logs at ERROR, once per reconnect attempt — is replaced with a
+warn-once one. Ten `emit_metric()` calls against two dead backends complete in ~0.1 s and
+produce three log lines. `INFLUXDB_URL` is worth double-checking after any change: the
+InfluxDB client constructs lazily, so a wrong URL is only reported when the first write
+fails (`influx_write_failed`), not at startup.
 
 When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, every tool call is wrapped in a span named
 `dockhand.tool.<name>` (via a FastMCP middleware) and exported to the collector; spans and NATS

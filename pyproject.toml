@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dockhand-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "FastMCP Python MCP server wrapping the Dockhand REST API"
 requires-python = ">=3.11"
 dependencies = [
