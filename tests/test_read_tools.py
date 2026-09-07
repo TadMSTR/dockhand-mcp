@@ -410,3 +410,22 @@ def test_route_surface_matches_the_declared_allowlist():
         "/api/volumes",
     }
     assert _route_literals() == expected
+
+
+def test_readme_documents_every_tool():
+    """The README tool table and the registered tools are one fact in two places.
+
+    This repo's recurring defect is documentation that describes behaviour the
+    code does not have — update_container's docstring was wrong from v0.1.0 to
+    2026-09-07. A table that drifts is the same failure in a more public place.
+    """
+    import pathlib
+    import re as _re
+
+    from .test_tool_errors_and_metrics import ALL_TOOLS
+
+    readme = pathlib.Path(server.__file__).parent.parent / "README.md"
+    table = readme.read_text().split("## Tool Reference", 1)[1].split("\n## ", 1)[0]
+    documented = set(_re.findall(r"^\| `(\w+)`", table, _re.MULTILINE))
+
+    assert documented == {name for name, _ in ALL_TOOLS}
