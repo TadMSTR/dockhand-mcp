@@ -385,35 +385,83 @@ async def container_action(
 
 @mcp.tool
 async def stack_action(
-    stack_name: str, action: str, environment_id: Optional[str] = None
+    stack_name: str,
+    action: str,
+    environment_id: Optional[str] = None,
+    pull: Optional[bool] = None,
+    build: Optional[bool] = None,
+    force_recreate: Optional[bool] = None,
 ) -> dict:
     """Perform a lifecycle action on a Docker Compose stack.
 
     Actions: start, stop, restart, deploy.
-    'deploy' pulls new images and recreates the stack (equivalent to docker compose up -d --pull).
     Use list_stacks to see available stack names.
 
-    Dockhand runs the action asynchronously; this tool waits for the job to
-    finish and returns its result: {jobId, success, output} on success or
-    {jobId, success: false, error} on failure.
+    **deploy is whole-stack.** Dockhand's REST API has no per-service parameter —
+    its compose runner threads a service name internally, but the route never
+    accepts one. When you need single-service scope, run
+    ``docker compose up -d <service>`` via system-ops instead.
+
+    ``pull`` defaults to True, which makes Dockhand run ``compose up -d --pull
+    always``. That re-resolves every image and can recreate services you did not
+    intend to touch (vikunja#671). ``pull=False`` gives a plain
+    ``docker compose up -d``, which recreates only services whose resolved
+    config actually changed.
+
+    Job behaviour differs by action, per the v1.0.46 spec: ``start`` and ``stop``
+    return a jobId and are polled to completion here, returning
+    {jobId, success, output} or {jobId, success: false, error}. ``deploy`` and
+    ``restart`` return their result directly and are not polled.
 
     Args:
         stack_name: Stack name from list_stacks.
         action: One of: start, stop, restart, deploy.
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+        pull: deploy only. Re-pull images first. Defaults to True.
+        build: deploy only. Build images before starting. Defaults to False.
+        force_recreate: deploy only. Recreate containers even when config is
+            unchanged. Defaults to False.
     """
     if action not in _STACK_ACTIONS:
         return {"error": f"action must be one of: {', '.join(sorted(_STACK_ACTIONS))}"}
     if not _SAFE_ID.match(stack_name):
         return {"error": f"Invalid stack_name: {stack_name!r}"}
 
+    # These three are rejected rather than ignored on the bodyless actions.
+    # Accepting pull=False on a restart and dropping it would report a flag as
+    # honoured that Dockhand never received — the same class of defect as a skip
+    # that reads as a completed update. Defaults are None, not the real defaults,
+    # so "explicitly asked for" is distinguishable from "left alone".
+    if action != "deploy":
+        supplied = [
+            name
+            for name, value in (
+                ("pull", pull),
+                ("build", build),
+                ("force_recreate", force_recreate),
+            )
+            if value is not None
+        ]
+        if supplied:
+            return {
+                "error": (
+                    f"{', '.join(supplied)} applies only to action='deploy'; "
+                    f"{action!r} sends no body and Dockhand would ignore it."
+                )
+            }
+
     try:
         client = get_client()
         env = client.resolve_env(environment_id)
         # deploy's handler calls request.json() and 500s on an empty body;
-        # start/stop/restart take no body.
+        # start/stop/restart take no body. Unset flags resolve to the historical
+        # hardcoded values so existing callers see no behaviour change.
         body = (
-            {"pull": True, "build": False, "forceRecreate": False}
+            {
+                "pull": True if pull is None else pull,
+                "build": False if build is None else build,
+                "forceRecreate": False if force_recreate is None else force_recreate,
+            }
             if action == "deploy"
             else None
         )

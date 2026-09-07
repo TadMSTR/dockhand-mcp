@@ -141,6 +141,81 @@ async def test_stack_action_restart_sends_no_body(mock_env):
         assert result["success"] is True
 
 
+# vikunja#671: deploy hardcoded pull=True, which becomes `compose up -d --pull
+# always` and re-resolves every image — the likely cause of the unexpected
+# librechat recreates. These assert the flags reach the body verbatim.
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, {"pull": True, "build": False, "forceRecreate": False}),
+        ({"pull": False}, {"pull": False, "build": False, "forceRecreate": False}),
+        ({"build": True}, {"pull": True, "build": True, "forceRecreate": False}),
+        (
+            {"force_recreate": True},
+            {"pull": True, "build": False, "forceRecreate": True},
+        ),
+        (
+            {"pull": False, "build": True, "force_recreate": True},
+            {"pull": False, "build": True, "forceRecreate": True},
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stack_action_deploy_flags_reach_the_body(mock_env, kwargs, expected):
+    with respx.mock(base_url=ENDPOINT) as mock:
+        deploy = mock.post("/api/stacks/searxng/deploy").mock(
+            return_value=httpx.Response(200, json={"success": True, "output": "ok"})
+        )
+
+        await server.stack_action(stack_name="searxng", action="deploy", **kwargs)
+
+        assert json.loads(deploy.calls[0].request.content) == expected
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+@pytest.mark.parametrize("flag", ["pull", "build", "force_recreate"])
+@pytest.mark.asyncio
+async def test_stack_action_rejects_deploy_flags_on_bodyless_actions(
+    mock_env, action, flag
+):
+    """Silently dropping the flag would report it as honoured when Dockhand
+    never received it — the route sends no body at all."""
+    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        route = mock.post(f"/api/stacks/searxng/{action}").mock(
+            return_value=httpx.Response(200, json=JOB_QUEUED)
+        )
+
+        result = await server.stack_action(
+            stack_name="searxng", action=action, **{flag: False}
+        )
+
+        assert flag in result["error"]
+        assert "deploy" in result["error"]
+        # Rejected before the request, not after.
+        assert route.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_stack_action_deploy_is_not_polled(mock_env):
+    """Per the v1.0.46 spec, jobId is documented on start/stop/down — not deploy.
+    Nothing should be polled when the route answers directly."""
+    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        mock.post("/api/stacks/searxng/deploy").mock(
+            return_value=httpx.Response(200, json={"success": True, "output": "ok"})
+        )
+        jobs = mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
+            return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
+        )
+
+        result = await server.stack_action(
+            stack_name="searxng", action="deploy", pull=False
+        )
+
+        assert jobs.call_count == 0
+        assert result["success"] is True
+
+
 @pytest.mark.asyncio
 async def test_stack_action_surfaces_job_failure(mock_env):
     """A job that finishes with success=false is reported as a failure, not a
