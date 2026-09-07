@@ -89,6 +89,58 @@ async def test_listings_unwrap_and_count(mock_env, tool, path, key):
 
 
 # ---------------------------------------------------------------------------
+# pending-updates has its own envelope, and reading the wrong key reports zero
+# ---------------------------------------------------------------------------
+
+# Captured from the live v1.0.46 response on 2026-09-07. The first draft of
+# get_pending_updates unwrapped data["updates"]; the real key is
+# "pendingUpdates", so it reported total=0 against a host with 27 — a zero
+# indistinguishable from a genuine "nothing pending". The bare-[] fixture used
+# elsewhere passed happily either way, which is exactly why this one exists.
+PENDING_UPDATES_LIVE = {
+    "environmentId": 1,
+    "pendingUpdates": [
+        {
+            "containerId": "aaa111",
+            "containerName": "plane-db",
+            "currentImage": "postgres:15",
+            "checkedAt": "2026-09-07T19:00:00Z",
+            "hasImageUpdate": True,
+            "newerVersion": "postgres:16",
+        },
+        {
+            "containerId": "bbb222",
+            "containerName": "langfuse-db",
+            "currentImage": "postgres:15",
+            "checkedAt": "2026-09-07T19:00:00Z",
+            "hasImageUpdate": True,
+        },
+        {
+            "containerId": "ccc333",
+            "containerName": "settled",
+            "currentImage": "redis:7",
+            "checkedAt": "2026-09-07T19:00:00Z",
+            "hasImageUpdate": False,
+        },
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_get_pending_updates_reads_the_real_envelope_key(mock_env):
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/pending-updates").mock(
+            return_value=httpx.Response(200, json=PENDING_UPDATES_LIVE)
+        )
+
+        result = await server.get_pending_updates()
+
+        assert result["total"] == 3, "reading the wrong envelope key reports zero"
+        assert result["withUpdateAvailable"] == 2
+        assert result["pendingUpdates"][0]["containerName"] == "plane-db"
+
+
+# ---------------------------------------------------------------------------
 # The silent-empty failure mode resolve_env() exists to prevent (vikunja#10, #126)
 # ---------------------------------------------------------------------------
 

@@ -275,16 +275,30 @@ async def test_container_action_remove_uses_delete_with_env(mock_env):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_check_updates_sends_env(mock_env):
-    with respx.mock(base_url=ENDPOINT) as mock:
+async def test_check_updates_sends_env_and_returns_the_final_result(mock_env):
+    """This route is synchronous for us and returns no jobId.
+
+    It documents a text/event-stream job feed "or, with Accept: application/json,
+    the final result as plain JSON", and client.py sets that header on every
+    request. The previous version of this test mocked a {"jobId": ...} response
+    and asserted the tool surfaced it — a shape Dockhand never sends here, and
+    every real call in the service's logs recorded an empty job id.
+    """
+    final_result = {"total": 124, "updatesFound": 27, "results": []}
+    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
         route = mock.post("/api/containers/check-updates").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+            return_value=httpx.Response(200, json=final_result)
+        )
+        jobs = mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
+            return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
 
         result = await server.check_updates()
 
         assert _env_of(route) == "1"
-        assert result["jobId"] == JOB_QUEUED["jobId"]
+        assert result["updatesFound"] == 27
+        assert "jobId" not in result
+        assert jobs.call_count == 0
 
 
 # update_container previously posted {"repullImage", "startAfterUpdate"} to

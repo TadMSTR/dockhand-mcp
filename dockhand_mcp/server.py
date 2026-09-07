@@ -638,14 +638,28 @@ async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
             client, "/api/containers/pending-updates", params={"env": env}
         )
         data = resp.json()
-        updates = data if isinstance(data, list) else data.get("updates", [])
-        log.info("get_pending_updates", total=len(updates), duration_s=round(duration, 3))
+        # The key is "pendingUpdates", not "updates". Reading the wrong one
+        # returned total=0 against a host that had 27 — a zero indistinguishable
+        # from a real "nothing pending", which is the whole failure mode this
+        # tool exists to avoid. Verified against the live response, not guessed.
+        updates = data if isinstance(data, list) else data.get("pendingUpdates", [])
+        available = sum(1 for u in updates if isinstance(u, dict) and u.get("hasImageUpdate"))
+        log.info(
+            "get_pending_updates",
+            total=len(updates),
+            available=available,
+            duration_s=round(duration, 3),
+        )
         await emit_metric(
             "dockhand_tool",
             {"tool": "get_pending_updates"},
             {"duration_s": duration, "total": len(updates)},
         )
-        return {"updates": updates, "total": len(updates)}
+        return {
+            "pendingUpdates": updates,
+            "total": len(updates),
+            "withUpdateAvailable": available,
+        }
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("get_pending_updates", e)
 
@@ -842,15 +856,23 @@ async def stack_action(
 
 @mcp.tool
 async def check_updates(environment_id: Optional[str] = None) -> dict:
-    """Queue an image update check for all containers.
+    """Check every container for a newer image, and wait for the answer.
 
-    Dockhand checks whether newer image tags are available for running containers.
-    Returns a job ID — use get_activity to see when it completes.
-    After completion, list_containers will show which containers have updates available.
+    Not queued, despite the name: Dockhand documents this route as a
+    text/event-stream job feed "or, with Accept: application/json, the final
+    result as plain JSON" — and client.py sets that header on every request. So
+    it returns the completed result directly, as {total, updatesFound, results}.
+
+    Returns no job ID. The old docstring said it did and told callers to poll
+    get_activity; jobId is documented on six routes and this is not one of them,
+    and every real call in this service's logs recorded an empty job id.
+
+    Expect this to take a while — it contacts a registry per image. Use
+    get_pending_updates afterwards to read the result back without re-running it.
 
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
-            Without it the queued job resolves to 'No environment specified'.
+            Without it Dockhand fails with 'No environment specified'.
     """
     try:
         client = get_client()
@@ -859,8 +881,14 @@ async def check_updates(environment_id: Optional[str] = None) -> dict:
             client, "/api/containers/check-updates", params={"env": env}
         )
         data = resp.json()
-        job_id = data.get("jobId", "")
-        log.info("check_updates", job_id=job_id, duration_s=round(duration, 3))
+        # Not job_id: this route returns {total, updatesFound, results} directly
+        # and every real call logged an empty job id for the life of the service.
+        log.info(
+            "check_updates",
+            checked=data.get("total"),
+            updates_found=data.get("updatesFound"),
+            duration_s=round(duration, 3),
+        )
         await emit_metric(
             "dockhand_tool",
             {"tool": "check_updates"},
