@@ -1,5 +1,109 @@
 # Changelog
 
+## [0.5.0] — 2026-09-07
+
+Closes the open-ticket set against this repo. The headline is that
+`update_container` had **never once succeeded** in production, and the test
+covering it asserted the exact request body that made it fail.
+
+### Fixed
+
+- **`update_container` now works. It never had.** The tool posted
+  `{"repullImage": true, "startAfterUpdate": true}` to
+  `POST /api/containers/{id}/update`, whose handler destructures the body as
+  `{startAfterUpdate, repullImage, ...options}` and then calls
+  `pullImage(options.image)`. With no `image` in the body that argument was
+  `undefined`, and Dockhand threw
+  `Cannot read properties of undefined (reading 'includes')`. Four calls in the
+  entire log history, four identical 500s, zero successes, from v0.1.0 until now.
+  vikunja#702's `env_file` hypothesis is disproved — the failure is not
+  container-specific and has nothing to do with mounts.
+
+  Now posts to `POST /api/containers/batch-update`, which requires only
+  `{containerIds}` and performs the inspect-pull-recreate cycle server-side with
+  full Config/HostConfig passthrough. Two behaviours were measured against a live
+  v1.0.46 host rather than assumed: a successful update returns the **new**
+  container's id (the container is destroyed and recreated), while a skip or
+  failure returns the requested id; and the Docker-API recreate does **not**
+  orphan a compose-managed container — its compose labels and config-hash survive
+  byte-identical and a subsequent `compose up -d --dry-run` reports no change.
+  (vikunja#702)
+- **A skipped update is no longer reported as a completed one.** A container
+  labelled `dockhand.update=false` comes back from Dockhand as `success: true`
+  carrying an `error` string. That is now re-shaped to
+  `{success, skipped: true, reason}`, with `error` dropped — callers read a bare
+  `error` key as a tool failure, and a skip reported as a plain success is how an
+  agent concludes it deployed something it did not.
+- **`get_pending_updates` reported zero regardless of the truth.** It unwrapped
+  `data["updates"]`; the route returns `{environmentId, pendingUpdates}`. Against
+  a host with 27 pending updates it returned 0 — a zero indistinguishable from a
+  genuine "nothing pending". Found by running the new tool against the real host;
+  the covering test had mocked a bare `[]` and passed identically either way.
+- **Three docstrings described behaviour these tools do not have.**
+  `check_updates` and `update_container` both claimed to return a job ID to poll
+  with `get_activity`. Derived from the v1.0.46 OpenAPI spec, `jobId` appears on
+  exactly six routes and neither is among them; every real `check_updates` call
+  in this service's logs recorded an empty job id. `stack_action`'s docstring
+  claimed all four of its actions run asynchronously — only `start` and `stop` do.
+  The comment at `update_container`'s old call site was worse than the docstring:
+  it stated the broken body as the handler's requirement, teaching the wrong
+  contract to everyone who read it.
+
+### Added
+
+- **Nine read-only tools**, taking the surface from 9 to 18: `inspect_container`,
+  `get_container_logs`, `get_container_stats`, `get_stack_compose`, `list_images`,
+  `list_volumes`, `list_networks`, `get_pending_updates`, `get_host_info`. All
+  built against `openapi-v1.0.46.json`. (vikunja#724)
+- **Secret redaction in `inspect_container`, as the only control rather than a
+  second one.** The design assumed `GET /api/containers/{id}` masks a compose
+  project's secrets while `/inspect` does not, and treated in-server redaction as
+  belt-and-braces. Measured against the live host, the masking does not fire at
+  all: **322 of 322** secret-shaped environment variables across 123 containers
+  came back unmasked, and the string `***` appeared nowhere in any response.
+  Dockhand masks variables it knows as a project's registered secrets, and forge's
+  stacks supply environment from `env_file` paths Dockhand cannot read — the same
+  root cause as vikunja#542/#410, filed as vikunja#725.
+
+  So this server redacts on its own: secret-shaped keys wholesale, plus a separate
+  pass for credentials embedded in URL values, since a bland `*_URL` key defeats
+  any name-based test. Covers `Config.Env` and `Config.Labels`; does not reach
+  `Cmd`, `Entrypoint` or `Args`, which the docstring and README both say.
+  `/api/containers/{id}/inspect` and the stack `env` routes are never wrapped, and
+  the route surface is now a closed set enforced by tests rather than by review.
+- **`pull`, `build` and `force_recreate` on `stack_action(deploy)`.** deploy
+  hardcoded `pull: true`, which becomes `compose up -d --pull always` and
+  re-resolves every image — the likely cause of the unexpected recreates in
+  vikunja#671. `pull=False` gives a plain `docker compose up -d`. Defaults are
+  unchanged. Passing any of the three to `start`/`stop`/`restart` is an error
+  rather than a silent no-op, since those routes send no body at all.
+  Per-service scoping remains impossible: the REST route has no service
+  parameter, so that half of #671 is upstream-only.
+
+### Security
+
+- **21 dependency advisories cleared to 0** across cryptography, joserfc, mcp,
+  pydantic-settings, python-multipart and starlette — all transitive via fastmcp,
+  now floored explicitly so a resolve cannot land a vulnerable version.
+  `pip` itself (7 advisories) was upgraded in the venv and deliberately not added
+  to `pyproject.toml`; it is venv tooling, not a shipped dependency. (vikunja#228)
+- `fastmcp` moves from `>=2.11` to `>=3.3,<4`. The ceiling is the point:
+  production runs 3.x and the old floor let CI resolve a major that is never
+  deployed. A fresh resolve — what CI does — lands 3.4.7 rather than the 3.3.1
+  already installed, so the server was confirmed to start and pass on 3.4.7
+  rather than inferred from a clean `pip` exit. (vikunja#611)
+
+### Repo
+
+- Adds `LICENSE` (MIT). The repo was public with no license, making the published
+  code all-rights-reserved. Adds the two Baseline README badges. (vikunja#723)
+- CI gains `permissions: contents: read`, SHA-pinned actions, a
+  `ruff format --check` gate and a `pip-audit --strict` gate. The tree-wide
+  reformat landed as its own commit so the format gate arrives green, and the
+  audit gate landed with the floors above so it does too.
+- Adds `.github/dependabot.yml` for pip and github-actions — the durable fix for
+  the dependency ticket recurring. (vikunja#317)
+
 ## [0.4.0] — 2026-08-29
 
 Observability and error-handling hardening. Everything below was a *runtime* defect that
