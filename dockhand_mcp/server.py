@@ -140,6 +140,87 @@ async def _finalize_job(client: DockhandClient, data: dict) -> dict:
     return {"jobId": job_id, **result}
 
 
+def _ids_match(returned: str, requested: str) -> bool:
+    """True when two Docker container ids refer to the same container.
+
+    Dockhand may echo the full 64-char id for a request that carried the 12-char
+    form, so an equality test would miss. Only useful on the paths where the id
+    survives — see _unwrap_batch_update.
+    """
+    if not returned or not requested:
+        return False
+    return returned.startswith(requested) or requested.startswith(returned)
+
+
+def _shape_batch_result(result: dict) -> dict:
+    """Re-shape one batch-update result so a skip cannot read as an update.
+
+    Dockhand reports a container it declined to touch as a **successful** result
+    carrying an ``error`` string ("Skipped - dockhand.update=false label"). A skip
+    that is indistinguishable from a completed update is how an agent concludes it
+    deployed something it did not.
+
+    The ``error`` key is dropped in that case: callers treat its presence as a
+    failure signal, and a skip is not a failure. A genuine failure keeps it.
+    """
+    out = dict(result)
+    reason = out.get("error")
+    if out.get("success") and reason:
+        out["skipped"] = True
+        out["reason"] = reason
+        out.pop("error", None)
+    return out
+
+
+def _unwrap_batch_update(data: dict, container_id: str) -> dict:
+    """Reduce a batch-update envelope to the one container this tool asked about.
+
+    ``POST /api/containers/batch-update`` answers with
+    ``{success, results: [...], summary}`` because it is built for many
+    containers. update_container's contract is one, so returning the envelope
+    would make every caller index into it.
+
+    **The returned id is not always the requested id.** Measured against
+    Dockhand v1.0.46 on 2026-09-07:
+
+    - a successful update returns the **new** container's id, because the
+      container was destroyed and recreated (requested ``a978d6d4…`` came back
+      as ``ea2167c1…``);
+    - a skip or a failure returns the id unchanged, because nothing was
+      recreated.
+
+    So matching on the id fails on exactly the path that succeeds. Since this
+    tool always sends exactly one id, a single result is unambiguously that
+    container and is taken as-is. Id matching is only a disambiguator for a
+    multi-result response, which this tool cannot currently provoke.
+    """
+    if not isinstance(data, dict):
+        return data
+    results = data.get("results")
+    if not isinstance(results, list):
+        return data
+    if not results:
+        return {
+            "success": False,
+            "error": (
+                f"Dockhand returned no batch-update result for container {container_id!r}"
+            ),
+        }
+    if len(results) == 1 and isinstance(results[0], dict):
+        return _shape_batch_result(results[0])
+
+    # More results than ids sent: identify ours rather than guessing at [0].
+    match = next(
+        (
+            r
+            for r in results
+            if isinstance(r, dict) and _ids_match(str(r.get("containerId", "")), container_id)
+        ),
+        None,
+    )
+    return _shape_batch_result(match) if match is not None else data
+
+
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
@@ -402,10 +483,25 @@ async def check_updates(environment_id: Optional[str] = None) -> dict:
 
 @mcp.tool
 async def update_container(container_id: str, environment_id: Optional[str] = None) -> dict:
-    """Pull the latest image and recreate a specific container.
+    """Re-pull a container's image and recreate the container in place.
 
-    Equivalent to pulling the new image and running docker compose up -d for
-    that container. Returns a job ID — use get_activity to track progress.
+    Recreates the container through Dockhand's batch-update endpoint, which
+    inspects the running container server-side, pulls its image and recreates it
+    with full Config/HostConfig passthrough — every setting is preserved and no
+    configuration is reconstructed by this tool.
+
+    This does **not** run ``docker compose``. A compose-managed container is
+    recreated through the Docker API directly.
+
+    Responds synchronously: there is no job to poll and no job ID to track.
+
+    For a **digest-pinned** image — which forge uses widely — this re-pulls the
+    same digest and recreates the container. That is a recreate, not an upgrade;
+    change the pin first if you want a new version.
+
+    Returns ``{success, containerId, containerName}``, or
+    ``{success: true, skipped: true, reason: ...}`` when the container carries the
+    ``dockhand.update=false`` label and Dockhand declined to touch it.
 
     Args:
         container_id: Container ID from list_containers.
@@ -417,25 +513,41 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
     try:
         client = get_client()
         env = client.resolve_env(environment_id)
-        # env is a query param (?env=); the handler also requires a JSON body
-        # ({repullImage, startAfterUpdate}) and 500s on an empty body.
-        # See stack_action: the timer must close after _finalize_job, which polls
-        # the async job for up to 120 s (vikunja#574 P5).
+        # Do NOT route this at POST /api/containers/{id}/update. That handler
+        # destructures the body as {startAfterUpdate, repullImage, ...options} and
+        # then calls pullImage(options.image), so a body carrying only the two
+        # control flags leaves options.image undefined and Dockhand throws
+        # "Cannot read properties of undefined (reading 'includes')". Every call
+        # this service ever made to that route failed that way, from v0.1.0 until
+        # 2026-09-07 — zero successes (vikunja#702).
+        #
+        # batch-update requires {containerIds} and nothing else, and does the
+        # inspect-pull-recreate cycle itself. The alternative — GET the container
+        # and echo its create-options back into /update — reimplements config
+        # passthrough in Python and loses fields.
+        #
+        # See stack_action: the timer must close after _finalize_job (vikunja#574 P5).
+        # batch-update is synchronous and returns no jobId, so the poll is a no-op
+        # here; it stays in the path in case upstream makes the route async.
         t0 = time.perf_counter()
         resp, post_duration = await _timed_post(
             client,
-            f"/api/containers/{container_id}/update",
+            "/api/containers/batch-update",
             params={"env": env},
-            json={"repullImage": True, "startAfterUpdate": True},
+            json={"containerIds": [container_id]},
         )
         data = resp.json() if resp.content else {"status": "ok"}
         data = await _finalize_job(client, data)
+        data = _unwrap_batch_update(data, container_id)
         duration = time.perf_counter() - t0
         log.info(
             "update_container",
             container_id=container_id[:12],
             env_id=env,
             success=data.get("success"),
+            # A skip is logged distinctly: "success=True" alone would record a
+            # container Dockhand never touched as an update that happened.
+            skipped=bool(data.get("skipped")),
             duration_s=round(duration, 3),
             post_duration_s=round(post_duration, 3),
         )

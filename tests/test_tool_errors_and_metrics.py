@@ -23,7 +23,13 @@ import respx
 from dockhand_mcp import client as client_module
 from dockhand_mcp import server
 
-from .conftest import ENDPOINT, JOB_DONE_SUCCESS, JOB_QUEUED, STACKS_RESPONSE
+from .conftest import (
+    BATCH_UPDATE_SUCCESS,
+    ENDPOINT,
+    JOB_DONE_SUCCESS,
+    JOB_QUEUED,
+    STACKS_RESPONSE,
+)
 
 # Every tool, with the arguments needed to reach get_client(). The action tools
 # validate their arguments before building a client, so the values must be valid
@@ -178,21 +184,32 @@ async def test_stack_action_duration_includes_the_job_poll(
 
 
 @pytest.mark.asyncio
-async def test_update_container_duration_includes_the_job_poll(
-    mock_env, slow_job, collect_metrics
-):
-    with respx.mock(base_url=ENDPOINT) as mock:
-        mock.post("/api/containers/abc123/update").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+async def test_update_container_does_not_poll_a_job(mock_env, collect_metrics):
+    """Retargeted from the old job-poll timing test (vikunja#574 P5).
+
+    update_container used to post to /api/containers/{id}/update and poll the
+    jobId it returned. It now posts to batch-update, which is synchronous and
+    documents no jobId — so the property worth pinning is the inverse: no job is
+    polled, and duration_s therefore collapses onto post_duration_s. The
+    poll-spanning invariant itself is still covered, by
+    test_stack_action_duration_includes_the_job_poll above, on a route that
+    genuinely returns one.
+    """
+    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
+        )
+        jobs = mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
+            return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
 
-        await server.update_container(container_id="abc123")
+        await server.update_container(container_id="abc123def456")
 
+    assert jobs.call_count == 0
     assert len(collect_metrics) == 1
     _, tags, fields = collect_metrics[0]
     assert tags == {"tool": "update_container"}
-    assert fields["duration_s"] >= POLL_DELAY
-    assert fields["post_duration_s"] < POLL_DELAY
+    assert fields["duration_s"] >= fields["post_duration_s"]
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +269,8 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
         mock.post("/api/containers/check-updates").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
-        mock.post("/api/containers/abc123/update").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
         )
         mock.post("/api/images/scan").mock(
             return_value=httpx.Response(200, json={"imageName": "nginx:latest"})

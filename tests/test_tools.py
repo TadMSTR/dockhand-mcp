@@ -15,6 +15,10 @@ import respx
 from dockhand_mcp import server
 
 from .conftest import (
+    BATCH_UPDATE_FAILED,
+    BATCH_UPDATE_MULTI,
+    BATCH_UPDATE_SKIPPED,
+    BATCH_UPDATE_SUCCESS,
     CONTAINERS_RESPONSE,
     ENDPOINT,
     JOB_DONE_FAILURE,
@@ -208,23 +212,139 @@ async def test_check_updates_sends_env(mock_env):
         assert result["jobId"] == JOB_QUEUED["jobId"]
 
 
+# update_container previously posted {"repullImage", "startAfterUpdate"} to
+# /api/containers/{id}/update, and the test here asserted that exact body. The
+# route destructures {startAfterUpdate, repullImage, ...options} and then calls
+# pullImage(options.image), so every call 500'd on
+# "Cannot read properties of undefined (reading 'includes')" — the tool never
+# once succeeded, and the test pinned the defect in place (vikunja#702).
+#
+# These replacements are written against openapi-v1.0.46.json's contract for
+# POST /api/containers/batch-update, not against what the code does.
+
 @pytest.mark.asyncio
-async def test_update_container_sends_env_in_query_and_body(mock_env):
-    """update_container puts env in the query (not the body) and sends the
-    required {repullImage, startAfterUpdate} body — the old code sent
-    {'environmentId': ...} in the body, which the handler ignored."""
+async def test_update_container_posts_batch_update(mock_env):
+    """The body is {containerIds: [id]} and env stays in the query string."""
     with respx.mock(base_url=ENDPOINT) as mock:
-        route = mock.post("/api/containers/abc123/update").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
-        )
-        mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
-            return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
+        route = mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
         )
 
-        result = await server.update_container(container_id="abc123")
+        result = await server.update_container(container_id="abc123def456")
 
         assert _env_of(route) == "1"
         body = json.loads(route.calls[0].request.content)
-        assert body == {"repullImage": True, "startAfterUpdate": True}
-        assert "environmentId" not in body
+        assert body == {"containerIds": ["abc123def456"]}
+
+        # Unwrapped to the single container, not the batch envelope.
         assert result["success"] is True
+        assert result["containerName"] == "nginx"
+        assert "results" not in result
+        assert "summary" not in result
+
+
+@pytest.mark.asyncio
+async def test_update_container_never_calls_the_update_route(mock_env):
+    """Regression guard for vikunja#702.
+
+    The old route is registered here purely so a call to it would be recorded
+    rather than raising as an unmocked request — the assertion is that it is
+    never reached.
+    """
+    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        broken = mock.post("/api/containers/abc123def456/update").mock(
+            return_value=httpx.Response(200, json=JOB_QUEUED)
+        )
+        fixed = mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
+        )
+
+        await server.update_container(container_id="abc123def456")
+
+        assert broken.call_count == 0
+        # Without this the test passes just as well when the tool makes no
+        # request at all — an early return would look like a fixed route.
+        assert fixed.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_update_container_surfaces_a_skip_distinctly(mock_env):
+    """dockhand.update=false comes back as success+error; it must not read as an
+    update that happened."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_SKIPPED)
+        )
+
+        result = await server.update_container(container_id="abc123def456")
+
+        assert result["skipped"] is True
+        assert "dockhand.update=false" in result["reason"]
+        # Callers read a bare `error` key as a tool failure; a skip is not one.
+        assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_update_container_reports_a_real_failure(mock_env):
+    """A genuine per-container failure keeps success=False and its error text."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_FAILED)
+        )
+
+        result = await server.update_container(container_id="abc123def456")
+
+        assert result["success"] is False
+        assert "Failed to pull image" in result["error"]
+        assert "skipped" not in result
+
+
+@pytest.mark.asyncio
+async def test_update_container_returns_the_recreated_id(mock_env):
+    """A successful update returns the NEW container id, not the requested one.
+
+    Measured live on Dockhand v1.0.46: the container is destroyed and recreated,
+    so matching the result on the requested id fails on exactly the path that
+    worked. The single-result case must therefore not depend on an id match.
+    """
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
+        )
+
+        result = await server.update_container(container_id="abc123def456")
+
+        assert result["success"] is True
+        assert result["containerId"] == "f00dcafe9999"
+        assert result["containerId"] != "abc123def456"
+
+
+@pytest.mark.asyncio
+async def test_update_container_picks_our_result_from_several(mock_env):
+    """With more results than ids sent, the right one is identified by id —
+    tolerating the full 64-char form echoed for a 12-char request."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_MULTI)
+        )
+
+        result = await server.update_container(container_id="abc123def456")
+
+        assert result["containerName"] == "nginx"
+
+
+@pytest.mark.asyncio
+async def test_update_container_flags_an_empty_result_set(mock_env):
+    """An empty results array must not read as a successful update."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(
+                200,
+                json={"success": True, "results": [], "summary": {"total": 0, "success": 0, "failed": 0}},
+            )
+        )
+
+        result = await server.update_container(container_id="abc123def456")
+
+        assert result["success"] is False
+        assert "no batch-update result" in result["error"]
