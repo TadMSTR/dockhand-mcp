@@ -1,3 +1,6 @@
+[![Built with Claude Code](https://img.shields.io/badge/Built_with-Claude_Code-6B57FF?logo=claude&logoColor=white)](https://claude.ai/code)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 # dockhand-mcp
 
 FastMCP Python MCP server wrapping the [Dockhand](https://github.com/Finsys/dockhand) REST API.

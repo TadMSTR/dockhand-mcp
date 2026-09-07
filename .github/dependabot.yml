@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    # A Python major is a reading task, not an auto-merge: it can change runtime
+    # behaviour under a service that is deployed as an editable install. Minor,
+    # patch and security PRs still open normally, which is what keeps vikunja#228
+    # from recurring.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    # Majors are NOT ignored here, unlike pip above. Both workflows pin actions
+    # to commit SHAs, and Dependabot is the only thing that will ever move them —
+    # ignoring majors would pin this repo to actions/checkout v4 indefinitely.
+    # An action major is also a CI-only change: it cannot reach production, and
+    # it fails visibly in the PR rather than silently at runtime.
