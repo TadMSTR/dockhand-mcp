@@ -328,6 +328,348 @@ async def get_activity(limit: int = 20, offset: int = 0) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Read tools — environment redaction
+# ---------------------------------------------------------------------------
+
+# SECURITY: this is the ONLY thing standing between inspect_container's caller and
+# every secret on the host. It was designed as a second layer behind Dockhand's own
+# masking; measurement on 2026-09-07 showed that masking does not fire here at all.
+#
+# GET /api/containers/{id} is documented as masking a compose project's secret
+# variables to KEY=***, and GET /api/containers/{id}/inspect is documented as not
+# masking anything. Against forge's live Dockhand v1.0.46, both returned 322 of 322
+# secret-shaped env vars UNMASKED across 123 containers — the string "***" appeared
+# nowhere in either response. Dockhand masks variables it knows as a project's
+# secrets, and forge's stacks supply env from env_file paths Dockhand's container
+# cannot read (vikunja#542/#410). So the masking is real code that never fires here.
+#
+# Consequence: do not weaken this pass on the grounds that Dockhand also masks.
+# It does not.
+_SECRET_KEY = re.compile(
+    r"PASSWORD|PASSWD|PASSPHRASE|TOKEN|SECRET|CREDENTIAL|APIKEY|API_KEY"
+    r"|ACCESS_KEY|PRIVATE_KEY|_KEY|KEY_|KEYS|SALT|BEARER|DSN",
+    re.IGNORECASE,
+)
+
+# Credentials embedded in a URL value (postgres://user:pass@host) are invisible to
+# a key-name test — the key is usually a bland *_URL or *_DSN.
+_URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@")
+
+_REDACTED = "***REDACTED***"
+
+
+def _redact_env_entry(entry: str) -> str:
+    """Redact one ``KEY=value`` string from a Docker ``Config.Env`` array."""
+    if not isinstance(entry, str):
+        return entry
+    key, sep, value = entry.partition("=")
+    if not sep:
+        return entry
+    if _SECRET_KEY.search(key):
+        return f"{key}={_REDACTED}"
+    # Not a secret-shaped key, but the value may still carry credentials.
+    return key + sep + _URL_CREDENTIALS.sub(rf"\g<scheme>{_REDACTED}@", value)
+
+
+def _redact_container_env(payload: Any) -> Any:
+    """Return ``payload`` with secret-shaped values in Config.Env/Labels redacted.
+
+    Scope, stated plainly because a redaction pass that overstates its reach is
+    worse than none: this covers ``Config.Env`` and ``Config.Labels``. It does
+    **not** inspect ``Config.Cmd``, ``Entrypoint`` or ``Args``, so a container
+    started with a credential on its command line is still returned in the clear.
+    inspect_container's docstring says so, and its output is to be treated as
+    sensitive regardless.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    out = dict(payload)
+    config = out.get("Config")
+    if isinstance(config, dict):
+        config = dict(config)
+        env = config.get("Env")
+        if isinstance(env, list):
+            config["Env"] = [_redact_env_entry(e) for e in env]
+        labels = config.get("Labels")
+        if isinstance(labels, dict):
+            config["Labels"] = {
+                k: (_REDACTED if _SECRET_KEY.search(str(k)) else v)
+                for k, v in labels.items()
+            }
+        out["Config"] = config
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Read tools — inventory and diagnostics
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+async def inspect_container(container_id: str, environment_id: Optional[str] = None) -> dict:
+    """Inspect a container's full Docker configuration — image, env, mounts, network.
+
+    **Treat the output as sensitive.** Environment variables whose name looks like
+    a credential (``*_TOKEN``, ``*_PASSWORD``, ``*_SECRET``, ``*_KEY``, ``*API_KEY*``
+    and similar) are replaced with ``***REDACTED***`` by this server before the
+    payload is returned, as are credentials embedded in URL values. That redaction
+    is the only protection there is: Dockhand documents masking on this route, but
+    it resolves a compose project's registered secrets and forge supplies env from
+    env_file paths Dockhand cannot read, so in practice nothing is masked upstream.
+
+    The redaction covers Config.Env and Config.Labels. It does **not** cover
+    Config.Cmd, Entrypoint or Args — a credential passed on a command line is
+    still returned in the clear.
+
+    Args:
+        container_id: Container ID from list_containers.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    if not _SAFE_ID.match(container_id):
+        return {"error": f"Invalid container_id: {container_id!r}"}
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        # NOT /api/containers/{id}/inspect. That route additionally returns raw
+        # drift data and has no masking pass of any kind upstream. Wrapping it
+        # would hand every caller the complete environment of every container.
+        resp, duration = await _timed_get(
+            client, f"/api/containers/{container_id}", params={"env": env}
+        )
+        data = _redact_container_env(resp.json())
+        log.info(
+            "inspect_container", container_id=container_id[:12], duration_s=round(duration, 3)
+        )
+        await emit_metric(
+            "dockhand_tool",
+            {"tool": "inspect_container"},
+            {"duration_s": duration, "container_id": container_id[:12]},
+        )
+        return data
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("inspect_container", e)
+
+
+@mcp.tool
+async def get_container_logs(
+    container_id: str,
+    tail: int = 100,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    environment_id: Optional[str] = None,
+) -> dict:
+    """Get a container's combined stdout/stderr logs.
+
+    ``tail`` is bounded to 100 lines by default and capped at 5000 — an unbounded
+    default would pull a whole log history into the caller's context.
+
+    Logs may contain secrets that no redaction here can find, since a secret in a
+    log line has no key to match on. This is the same exposure as ``docker logs``.
+
+    Args:
+        container_id: Container ID from list_containers.
+        tail: Number of lines from the end of the log (default 100, max 5000).
+        since: Only logs after this timestamp, e.g. '2026-09-07T12:00:00Z'.
+        until: Only logs before this timestamp.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    if not _SAFE_ID.match(container_id):
+        return {"error": f"Invalid container_id: {container_id!r}"}
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        params: dict[str, Any] = {"env": env, "tail": max(1, min(int(tail), 5000))}
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+        resp, duration = await _timed_get(
+            client, f"/api/containers/{container_id}/logs", params=params
+        )
+        data = resp.json() if resp.content else {}
+        if not isinstance(data, dict):
+            data = {"logs": data}
+        log.info(
+            "get_container_logs",
+            container_id=container_id[:12],
+            tail=params["tail"],
+            duration_s=round(duration, 3),
+        )
+        await emit_metric(
+            "dockhand_tool",
+            {"tool": "get_container_logs"},
+            {"duration_s": duration, "container_id": container_id[:12]},
+        )
+        return data
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_container_logs", e)
+
+
+@mcp.tool
+async def get_container_stats(container_id: str, environment_id: Optional[str] = None) -> dict:
+    """Get a one-shot CPU, memory, network and block-IO snapshot for a container.
+
+    This is a single sample, not a stream — call it again for a second reading.
+
+    Args:
+        container_id: Container ID from list_containers.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    if not _SAFE_ID.match(container_id):
+        return {"error": f"Invalid container_id: {container_id!r}"}
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        resp, duration = await _timed_get(
+            client, f"/api/containers/{container_id}/stats", params={"env": env}
+        )
+        data = resp.json()
+        log.info(
+            "get_container_stats", container_id=container_id[:12], duration_s=round(duration, 3)
+        )
+        await emit_metric(
+            "dockhand_tool",
+            {"tool": "get_container_stats"},
+            {"duration_s": duration, "container_id": container_id[:12]},
+        )
+        return data if isinstance(data, dict) else {"stats": data}
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_container_stats", e)
+
+
+@mcp.tool
+async def get_stack_compose(stack_name: str, environment_id: Optional[str] = None) -> dict:
+    """Get a stack's docker-compose file content and its resolved compose/env paths.
+
+    Returns the compose definition only. Stack environment *values* are not
+    exposed by this server at all — Dockhand's stack env routes have no masking
+    and are deliberately not wrapped.
+
+    Args:
+        stack_name: Stack name from list_stacks.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    if not _SAFE_ID.match(stack_name):
+        return {"error": f"Invalid stack_name: {stack_name!r}"}
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        resp, duration = await _timed_get(
+            client, f"/api/stacks/{stack_name}/compose", params={"env": env}
+        )
+        data = resp.json()
+        log.info("get_stack_compose", stack=stack_name, duration_s=round(duration, 3))
+        await emit_metric(
+            "dockhand_tool",
+            {"tool": "get_stack_compose"},
+            {"duration_s": duration, "stack": stack_name},
+        )
+        return data if isinstance(data, dict) else {"compose": data}
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_stack_compose", e)
+
+
+async def _listing_tool(tool: str, path: str, key: str, environment_id: Optional[str]) -> dict:
+    """Shared body for the flat inventory listings (images, volumes, networks).
+
+    All three answer ``[]`` rather than an error when ``env`` is absent, which is
+    the silent-empty failure mode resolve_env() exists to prevent — so the env is
+    resolved (and raises) before the request is made.
+    """
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        resp, duration = await _timed_get(client, path, params={"env": env})
+        data = resp.json()
+        items = data if isinstance(data, list) else data.get(key, [])
+        log.info(tool, total=len(items), duration_s=round(duration, 3))
+        await emit_metric(
+            "dockhand_tool", {"tool": tool}, {"duration_s": duration, "total": len(items)}
+        )
+        return {key: items, "total": len(items)}
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error(tool, e)
+
+
+@mcp.tool
+async def list_images(environment_id: Optional[str] = None) -> dict:
+    """List Docker images — id, tags, size and creation time.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    return await _listing_tool("list_images", "/api/images", "images", environment_id)
+
+
+@mcp.tool
+async def list_volumes(environment_id: Optional[str] = None) -> dict:
+    """List Docker volumes — name, driver, mountpoint and labels.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    return await _listing_tool("list_volumes", "/api/volumes", "volumes", environment_id)
+
+
+@mcp.tool
+async def list_networks(environment_id: Optional[str] = None) -> dict:
+    """List Docker networks — name, driver, scope and attached containers.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    return await _listing_tool("list_networks", "/api/networks", "networks", environment_id)
+
+
+@mcp.tool
+async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
+    """List containers with an image update available.
+
+    Reports what a previous check_updates run found; it does not run a new check.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+            Required on this route — unlike the other listings, Dockhand documents
+            ``env`` as mandatory here.
+    """
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        resp, duration = await _timed_get(
+            client, "/api/containers/pending-updates", params={"env": env}
+        )
+        data = resp.json()
+        updates = data if isinstance(data, list) else data.get("updates", [])
+        log.info("get_pending_updates", total=len(updates), duration_s=round(duration, 3))
+        await emit_metric(
+            "dockhand_tool",
+            {"tool": "get_pending_updates"},
+            {"duration_s": duration, "total": len(updates)},
+        )
+        return {"updates": updates, "total": len(updates)}
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_pending_updates", e)
+
+
+@mcp.tool
+async def get_host_info(environment_id: Optional[str] = None) -> dict:
+    """Get Docker host information — hostname, CPU, memory, uptime, container counts.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        resp, duration = await _timed_get(client, "/api/host", params={"env": env})
+        data = resp.json()
+        log.info("get_host_info", duration_s=round(duration, 3))
+        await emit_metric("dockhand_tool", {"tool": "get_host_info"}, {"duration_s": duration})
+        return data if isinstance(data, dict) else {"host": data}
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_host_info", e)
+
+
+# ---------------------------------------------------------------------------
 # Action tools
 # ---------------------------------------------------------------------------
 

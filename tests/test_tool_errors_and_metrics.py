@@ -44,6 +44,16 @@ ALL_TOOLS = [
     ("check_updates", {}),
     ("update_container", {"container_id": "abc123"}),
     ("scan_image", {"image_name": "nginx:latest"}),
+    # Phase 6 read-only surface.
+    ("inspect_container", {"container_id": "abc123"}),
+    ("get_container_logs", {"container_id": "abc123"}),
+    ("get_container_stats", {"container_id": "abc123"}),
+    ("get_stack_compose", {"stack_name": "searxng"}),
+    ("list_images", {}),
+    ("list_volumes", {}),
+    ("list_networks", {}),
+    ("get_pending_updates", {}),
+    ("get_host_info", {}),
 ]
 
 
@@ -70,9 +80,14 @@ def collect_metrics(monkeypatch):
 # Phase 6 — a config error is returned, never raised
 # ---------------------------------------------------------------------------
 
-def test_all_nine_tools_are_covered_by_the_config_error_test():
-    """Guards the roster. A tenth tool added without a row here would otherwise
-    reintroduce the bug in the one place nothing checks."""
+def test_every_tool_is_covered_by_the_config_error_test():
+    """Guards the roster. A tool added without a row in ALL_TOOLS would otherwise
+    reintroduce the bug in the one place nothing checks.
+
+    Deliberately not asserted against a hardcoded count — a number in the test
+    name goes stale the moment the surface grows, and updating it is the step
+    that gets skipped.
+    """
     registered = {
         name
         for name, obj in vars(server).items()
@@ -274,6 +289,28 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
         )
         mock.post("/api/images/scan").mock(
             return_value=httpx.Response(200, json={"imageName": "nginx:latest"})
+        )
+        # Phase 6 read-only surface.
+        mock.get("/api/containers/abc123").mock(
+            return_value=httpx.Response(200, json={"Id": "abc123", "Config": {"Env": []}})
+        )
+        mock.get("/api/containers/abc123/logs").mock(
+            return_value=httpx.Response(200, json={"logs": ""})
+        )
+        mock.get("/api/containers/abc123/stats").mock(
+            return_value=httpx.Response(200, json={"cpu": 0.0})
+        )
+        mock.get("/api/stacks/searxng/compose").mock(
+            return_value=httpx.Response(200, json={"content": "services: {}"})
+        )
+        mock.get("/api/images").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/volumes").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/networks").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/containers/pending-updates").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        mock.get("/api/host").mock(
+            return_value=httpx.Response(200, json={"hostname": "forge"})
         )
         mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
