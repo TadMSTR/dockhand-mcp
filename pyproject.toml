@@ -8,10 +8,25 @@ version = "0.4.0"
 description = "FastMCP Python MCP server wrapping the Dockhand REST API"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=2.11",
+    # Ceiling, not just a floor: production runs 3.x, and ">=2.11" let CI resolve
+    # a major that is never deployed — the vikunja#611 class of gap where the
+    # tested tree and the running tree are different code.
+    "fastmcp>=3.3,<4",
     "httpx>=0.27",
     "pydantic>=2.0",
     "structlog>=24.0",
+
+    # Transitive via fastmcp, pinned here only to hold them above their
+    # advisories' fixed versions (vikunja#228). None of these is imported by
+    # dockhand_mcp; they are declared so a resolve cannot land a vulnerable
+    # version, and so the pip-audit CI gate has something to hold the line at.
+    # Drop an entry once fastmcp's own floor is at or above it.
+    "cryptography>=49.0.0",     # PYSEC-2026-3552/3553/3554, GHSA-537c-gmf6-5ccf
+    "joserfc>=1.6.8",           # PYSEC-2026-2528
+    "mcp>=1.28.1",              # PYSEC-2026-3481/3482/3483
+    "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j
+    "python-multipart>=0.0.31",  # PYSEC-2026-3036/3037/3040
+    "starlette>=1.3.1",         # PYSEC-2026-248/249
 ]
 
 [project.optional-dependencies]
