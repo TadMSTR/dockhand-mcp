@@ -346,16 +346,93 @@ async def get_activity(limit: int = 20, offset: int = 0) -> dict:
 # Consequence: do not weaken this pass on the grounds that Dockhand also masks.
 # It does not.
 _SECRET_KEY = re.compile(
-    r"PASSWORD|PASSWD|PASSPHRASE|TOKEN|SECRET|CREDENTIAL|APIKEY|API_KEY"
-    r"|ACCESS_KEY|PRIVATE_KEY|_KEY|KEY_|KEYS|SALT|BEARER|DSN",
+    # "PASS" is deliberately a bare substring, not \bPASS\b: the live miss that
+    # prompted this was DFLY_requirepass, where "pass" has no word boundary.
+    # It subsumes PASSWORD/PASSWD/PASSPHRASE. Likewise PWD for POSTGRES_PWD.
+    # Over-matching here is cheap because a provably-benign value escapes below,
+    # so AUTH does not redact the ~30 GF_AUTH_*=true config flags on this host.
+    r"PASS|PWD|TOKEN|SECRET|CREDENTIAL|CREDS|APIKEY|API_KEY|ACCESS_KEY"
+    r"|PRIVATE_KEY|_KEY|KEY_|KEYS|SALT|BEARER|DSN|AUTH|SIGNATURE|SIGNING",
     re.IGNORECASE,
 )
 
+# Values that cannot be a credential whatever their key is called. This is what
+# makes the deliberately greedy key pattern above survivable.
+_BENIGN_VALUE = re.compile(
+    r"^(?:true|false|yes|no|on|off|none|null|nil|debug|info|warn|warning|error"
+    r"|fatal|trace|silent|verbose|production|development|staging|test|always"
+    r"|never|auto|enabled|disabled)$",
+    re.IGNORECASE,
+)
+_NUMERIC_VALUE = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+# A single opaque token of any real length — the shape every secret on this host
+# actually has. This is the half that catches a credential under a key nobody
+# thought to pattern-match, which is the failure mode a key allowlist cannot fix:
+# it can only ever be current up to the last audit that tried to defeat it.
+_OPAQUE_CREDENTIAL = re.compile(r"^[A-Za-z0-9+/=_.~-]{20,}$")
+
 # Credentials embedded in a URL value (postgres://user:pass@host) are invisible to
-# a key-name test — the key is usually a bland *_URL or *_DSN.
+# a key-name test — the key is usually a bland *_URL. Many live here.
 _URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@")
 
+# A credential in a URL query string has no userinfo to strip and usually sits
+# under a bland key like FEED_URL, so neither the key test nor the userinfo test
+# sees it.
+_URL_QUERY_SECRET = re.compile(
+    r"(?P<sep>[?&])"
+    r"(?P<name>[^=&\s]*(?:PASS|PWD|TOKEN|SECRET|KEY|AUTH|SIG|CREDENTIAL)[^=&\s]*)"
+    r"=(?P<value>[^&\s]*)",
+    re.IGNORECASE,
+)
+
 _REDACTED = "***REDACTED***"
+
+
+def _is_benign_value(value: str) -> bool:
+    """True when a value cannot be a credential regardless of its key's name.
+
+    Only consulted for keys that do NOT look secret-shaped — see _redact_value,
+    where a secret-shaped key gets a much narrower escape.
+    """
+    if _is_structurally_harmless(value):
+        return True
+    # An "@" means possible userinfo; whitespace means prose, not a token.
+    if "@" in value or re.search(r"\s", value):
+        return False
+    if value.startswith("/"):
+        return True  # absolute filesystem path
+    if "://" in value:
+        # A URL with no userinfo — benign unless it carries a secret-shaped
+        # query parameter, e.g. ...?access_token=...
+        return not _SECRET_KEY.search(value.partition("?")[2])
+    return False
+
+
+def _is_structurally_harmless(value: str) -> bool:
+    """A value that cannot encode a credential at all: empty, a flag, a number."""
+    return bool(value == "" or _BENIGN_VALUE.match(value) or _NUMERIC_VALUE.match(value))
+
+
+def _redact_value(key: str, value: str) -> str:
+    """Redact one key/value pair, defaulting to deny for anything unrecognised."""
+    if _SECRET_KEY.search(key):
+        # A secret-shaped key gets only the narrow escape. Deliberately NOT the
+        # path/URL escape: a webhook URL stored under WEBHOOK_SECRET *is* the
+        # secret, and letting the URL branch run first leaked exactly that.
+        return value if _is_structurally_harmless(value) else _REDACTED
+
+    if _is_benign_value(value):
+        return value
+
+    # The half a key allowlist cannot provide: an opaque token under a key
+    # nobody thought to pattern-match.
+    if _OPAQUE_CREDENTIAL.match(value):
+        return _REDACTED
+
+    # Otherwise the value is not itself a secret, but may still carry one.
+    value = _URL_CREDENTIALS.sub(rf"\g<scheme>{_REDACTED}@", value)
+    return _URL_QUERY_SECRET.sub(rf"\g<sep>\g<name>={_REDACTED}", value)
 
 
 def _redact_env_entry(entry: str) -> str:
@@ -365,10 +442,7 @@ def _redact_env_entry(entry: str) -> str:
     key, sep, value = entry.partition("=")
     if not sep:
         return entry
-    if _SECRET_KEY.search(key):
-        return f"{key}={_REDACTED}"
-    # Not a secret-shaped key, but the value may still carry credentials.
-    return key + sep + _URL_CREDENTIALS.sub(rf"\g<scheme>{_REDACTED}@", value)
+    return f"{key}{sep}{_redact_value(key, value)}"
 
 
 def _redact_container_env(payload: Any) -> Any:
@@ -393,7 +467,8 @@ def _redact_container_env(payload: Any) -> Any:
         labels = config.get("Labels")
         if isinstance(labels, dict):
             config["Labels"] = {
-                k: (_REDACTED if _SECRET_KEY.search(str(k)) else v) for k, v in labels.items()
+                k: (_redact_value(str(k), v) if isinstance(v, str) else v)
+                for k, v in labels.items()
             }
         out["Config"] = config
     return out

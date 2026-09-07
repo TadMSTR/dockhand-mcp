@@ -216,6 +216,17 @@ async def test_inspect_container_never_calls_the_unmasked_inspect_route(mock_env
         "COREPACK_INTEGRITY_KEYS=xyz",
         "SESSION_SALT=peppery",
         "MY_BEARER=abc123",
+        # Real key names from forge containers that the first version of this
+        # regex missed. POSTGRES_PWD and DFLY_requirepass were found by the
+        # security audit against live deployed compose files; the rest came out
+        # of scanning all 123 containers afterwards. "requirepass" contains
+        # neither "password" nor "passwd", and "PWD" is not "PASSWD".
+        "POSTGRES_PWD=e3b0c44298fc1c149afbf4c8996fb924",
+        "DFLY_requirepass=27ae41e4649b934ca495991b7852b855",
+        "RABBITMQ_DEFAULT_PASS=da39a3ee5e6b4b0d3255bfef95601890",
+        "NEO4J_AUTH=neo4j/5e884898da28047151d0e56f8dc62927",
+        "REDIS_AUTH=6b86b273ff34fce19d6b804eff5a3f57",
+        "CREDS_IV=d4735e3a265e16eee03f59718b9b5d03",
     ],
 )
 @pytest.mark.asyncio
@@ -235,6 +246,123 @@ async def test_inspect_container_redacts_secret_shaped_env(mock_env, entry):
         assert any(e.endswith("***REDACTED***") for e in env)
         # Non-secret config is still readable, or the tool is useless.
         assert "TZ=Europe/London" in env
+
+
+@pytest.mark.parametrize(
+    ("entry", "why"),
+    [
+        # A greedy key pattern (PASS/PWD/AUTH/_KEY) would bury this host's ~30
+        # GF_AUTH_*/VIKUNJA_AUTH_* config flags. A value that cannot be a
+        # credential is shown whatever its key is called.
+        ("GF_AUTH_GENERIC_OAUTH_ENABLED=true", "boolean"),
+        ("VIKUNJA_AUTH_LOCAL_ENABLED=false", "boolean"),
+        ("AUTHENTIK_EMAIL__PORT=587", "numeric"),
+        ("AUTHENTIK_LOG_LEVEL=info", "log level"),
+        ("SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt", "absolute path"),
+        ("REDIS_URL=redis://cache:6379/0", "URL with no userinfo"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_inspect_container_keeps_values_that_cannot_be_secrets(mock_env, entry, why):
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123").mock(
+            return_value=httpx.Response(200, json={"Config": {"Env": [entry]}})
+        )
+
+        result = await server.inspect_container(container_id="abc123")
+
+        assert result["Config"]["Env"] == [entry], f"{why} should stay readable"
+
+
+@pytest.mark.asyncio
+async def test_secret_shaped_key_does_not_escape_via_a_path_or_url_value(mock_env):
+    """Records a deliberate usability trade-off, not an oversight.
+
+    TEMPORAL_TLS_KEY=/etc/temporal/config/tls.key is a *path to* a key, not a
+    key, and is live on temporal-ui — redacting it loses harmless information.
+    It is redacted anyway, because the path/URL escape running ahead of the key
+    test is exactly what leaked WEBHOOK_SECRET=https://hooks.example.com/... in
+    the test below. A secret-shaped key gets only the narrow escape (flag,
+    number, empty). Safety wins over legibility on this one payload, which the
+    audit called "the ONLY control".
+    """
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "Config": {
+                        "Env": [
+                            "TEMPORAL_TLS_KEY=/etc/temporal/config/tls.key",
+                            "TEMPORAL_TLS_ENABLED=false",
+                        ]
+                    }
+                },
+            )
+        )
+
+        env = (await server.inspect_container(container_id="abc123"))["Config"]["Env"]
+
+        assert env[0] == "TEMPORAL_TLS_KEY=***REDACTED***"
+        # The narrow escape still applies, so config flags stay readable.
+        assert env[1] == "TEMPORAL_TLS_ENABLED=false"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # The half a key allowlist cannot provide: an opaque token under a key
+        # nobody thought to pattern-match. A name-based list is only ever current
+        # up to the last audit that tried to defeat it.
+        "SOME_UNGUESSABLE_NAME=e3b0c44298fc1c149afbf4c8996fb92427ae41e4",
+        "DFLY_requirepass_alt=27ae41e4649b934ca495991b7852b8557ae41e44",
+        "X=da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    ],
+)
+@pytest.mark.asyncio
+async def test_inspect_container_redacts_opaque_values_under_any_key(mock_env, entry):
+    secret = entry.split("=", 1)[1]
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123").mock(
+            return_value=httpx.Response(200, json={"Config": {"Env": [entry]}})
+        )
+
+        result = await server.inspect_container(container_id="abc123")
+
+        assert secret not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_inspect_container_redacts_a_url_valued_secret_key(mock_env):
+    """A secret-shaped key whose value is a URL must not escape via the URL rule."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123").mock(
+            return_value=httpx.Response(
+                200,
+                json={"Config": {"Env": ["WEBHOOK_SECRET=https://hooks.example.com/T00/B01/xxxx"]}},
+            )
+        )
+
+        result = await server.inspect_container(container_id="abc123")
+
+        assert "B01" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_inspect_container_redacts_a_token_in_a_url_query(mock_env):
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "Config": {"Env": ["FEED_URL=https://api.example.com/v1?access_token=s3cr3t"]}
+                },
+            )
+        )
+
+        result = await server.inspect_container(container_id="abc123")
+
+        assert "s3cr3t" not in str(result)
 
 
 @pytest.mark.asyncio
