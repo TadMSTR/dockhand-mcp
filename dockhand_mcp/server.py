@@ -57,6 +57,7 @@ async def _lifespan(app):
         await close_client()
         log.info("dockhand_mcp_stopped")
 
+
 # --- Transport / endpoint auth configuration ------------------------------
 # stdio (default) keeps the historical per-turn subprocess mode for local dev.
 # http runs the long-lived PM2 service on a loopback port fronted by scoped-mcp.
@@ -77,9 +78,7 @@ _MIN_BEARER_LENGTH = 16
 # stdio mode has no HTTP surface so this only takes effect when MCP_TRANSPORT=http.
 _auth = None
 if _BEARER:
-    _auth = StaticTokenVerifier(
-        tokens={_BEARER: {"sub": "scoped-mcp", "client_id": "cli"}}
-    )
+    _auth = StaticTokenVerifier(tokens={_BEARER: {"sub": "scoped-mcp", "client_id": "cli"}})
 
 mcp = FastMCP(
     name="dockhand",
@@ -202,9 +201,7 @@ def _unwrap_batch_update(data: dict, container_id: str) -> dict:
     if not results:
         return {
             "success": False,
-            "error": (
-                f"Dockhand returned no batch-update result for container {container_id!r}"
-            ),
+            "error": (f"Dockhand returned no batch-update result for container {container_id!r}"),
         }
     if len(results) == 1 and isinstance(results[0], dict):
         return _shape_batch_result(results[0])
@@ -224,6 +221,7 @@ def _unwrap_batch_update(data: dict, container_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool
 async def get_health() -> dict:
@@ -262,7 +260,9 @@ async def list_containers(environment_id: Optional[str] = None) -> dict:
         data = resp.json()
         containers = data if isinstance(data, list) else data.get("containers", [])
         total = len(containers)
-        running = sum(1 for c in containers if (c.get("state") or c.get("status") or "").lower() == "running")
+        running = sum(
+            1 for c in containers if (c.get("state") or c.get("status") or "").lower() == "running"
+        )
         log.info("list_containers", total=total, running=running, duration_s=round(duration, 3))
         await emit_metric(
             "dockhand_tool",
@@ -393,8 +393,7 @@ def _redact_container_env(payload: Any) -> Any:
         labels = config.get("Labels")
         if isinstance(labels, dict):
             config["Labels"] = {
-                k: (_REDACTED if _SECRET_KEY.search(str(k)) else v)
-                for k, v in labels.items()
+                k: (_REDACTED if _SECRET_KEY.search(str(k)) else v) for k, v in labels.items()
             }
         out["Config"] = config
     return out
@@ -403,6 +402,7 @@ def _redact_container_env(payload: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Read tools — inventory and diagnostics
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool
 async def inspect_container(container_id: str, environment_id: Optional[str] = None) -> dict:
@@ -436,9 +436,7 @@ async def inspect_container(container_id: str, environment_id: Optional[str] = N
             client, f"/api/containers/{container_id}", params={"env": env}
         )
         data = _redact_container_env(resp.json())
-        log.info(
-            "inspect_container", container_id=container_id[:12], duration_s=round(duration, 3)
-        )
+        log.info("inspect_container", container_id=container_id[:12], duration_s=round(duration, 3))
         await emit_metric(
             "dockhand_tool",
             {"tool": "inspect_container"},
@@ -687,6 +685,7 @@ async def get_host_info(environment_id: Optional[str] = None) -> dict:
 # Action tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool
 async def container_action(
     container_id: str, action: str, environment_id: Optional[str] = None
@@ -713,9 +712,7 @@ async def container_action(
         env = client.resolve_env(environment_id)
         t0 = time.perf_counter()
         if action == "remove":
-            resp = await client.delete(
-                f"/api/containers/{container_id}", params={"env": env}
-            )
+            resp = await client.delete(f"/api/containers/{container_id}", params={"env": env})
         else:
             resp = await client.post(
                 f"/api/containers/{container_id}/{action}", params={"env": env}
@@ -1021,6 +1018,7 @@ async def scan_image(image_name: str) -> dict:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     if _TRANSPORT == "http":

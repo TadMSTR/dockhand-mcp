@@ -24,6 +24,7 @@ def _env_of(route):
 # Route + env contract, one per tool
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     ("tool", "kwargs", "path", "payload"),
     [
@@ -144,6 +145,7 @@ async def test_get_pending_updates_reads_the_real_envelope_key(mock_env):
 # The silent-empty failure mode resolve_env() exists to prevent (vikunja#10, #126)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     ("tool", "path"),
     [
@@ -177,6 +179,7 @@ async def test_unresolvable_env_fails_before_the_request(monkeypatch, tool, path
 # ---------------------------------------------------------------------------
 # SECURITY — the unmasked route must never be wrapped, and redaction must fire
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_inspect_container_never_calls_the_unmasked_inspect_route(mock_env):
@@ -222,9 +225,7 @@ async def test_inspect_container_redacts_secret_shaped_env(mock_env, entry):
     secret_value = entry.split("=", 1)[1]
     with respx.mock(base_url=ENDPOINT) as mock:
         mock.get("/api/containers/abc123").mock(
-            return_value=httpx.Response(
-                200, json={"Config": {"Env": [entry, "TZ=Europe/London"]}}
-            )
+            return_value=httpx.Response(200, json={"Config": {"Env": [entry, "TZ=Europe/London"]}})
         )
 
         result = await server.inspect_container(container_id="abc123")
@@ -287,6 +288,7 @@ async def test_inspect_container_redacts_secret_shaped_labels(mock_env):
 # Bounded logs
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     ("supplied", "expected"),
     [(None, "100"), (50, "50"), (999999, "5000"), (0, "1"), (-5, "1")],
@@ -339,6 +341,7 @@ async def test_get_container_logs_omits_unset_time_filters(mock_env):
 # The route surface is a closed set, enforced rather than reviewed
 # ---------------------------------------------------------------------------
 
+
 def _route_literals() -> set[str]:
     """Every Dockhand route literal the module can request.
 
@@ -359,9 +362,7 @@ def _route_literals() -> set[str]:
         src = pathlib.Path(module.__file__).read_text()
         # Strip whole-line comments so the prose explaining why /inspect is
         # avoided is not mistaken for a call to it.
-        body = "\n".join(
-            line for line in src.splitlines() if not line.lstrip().startswith("#")
-        )
+        body = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
         found |= set(_re.findall(r'f?"(/api/[^"]*)"', body))
     return found
 

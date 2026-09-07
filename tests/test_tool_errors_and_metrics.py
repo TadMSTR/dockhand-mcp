@@ -80,6 +80,7 @@ def collect_metrics(monkeypatch):
 # Phase 6 — a config error is returned, never raised
 # ---------------------------------------------------------------------------
 
+
 def test_every_tool_is_covered_by_the_config_error_test():
     """Guards the roster. A tool added without a row in ALL_TOOLS would otherwise
     reintroduce the bug in the one place nothing checks.
@@ -91,7 +92,8 @@ def test_every_tool_is_covered_by_the_config_error_test():
     registered = {
         name
         for name, obj in vars(server).items()
-        if callable(obj) and getattr(obj, "__module__", "") == server.__name__
+        if callable(obj)
+        and getattr(obj, "__module__", "") == server.__name__
         and not name.startswith("_")
         and asyncio.iscoroutinefunction(obj)
         and name not in {"main"}
@@ -177,9 +179,7 @@ def slow_job(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stack_action_duration_includes_the_job_poll(
-    mock_env, slow_job, collect_metrics
-):
+async def test_stack_action_duration_includes_the_job_poll(mock_env, slow_job, collect_metrics):
     with respx.mock(base_url=ENDPOINT) as mock:
         mock.post("/api/stacks/searxng/restart").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
@@ -231,12 +231,11 @@ async def test_update_container_does_not_poll_a_job(mock_env, collect_metrics):
 # Phase 5 — get_health and get_activity emit a metric like the other seven
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_get_health_emits_a_metric(mock_env, collect_metrics):
     with respx.mock(base_url=ENDPOINT) as mock:
-        mock.get("/api/health").mock(
-            return_value=httpx.Response(200, json={"status": "ok"})
-        )
+        mock.get("/api/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
 
         await server.get_health()
 
@@ -306,12 +305,8 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
         mock.get("/api/images").mock(return_value=httpx.Response(200, json=[]))
         mock.get("/api/volumes").mock(return_value=httpx.Response(200, json=[]))
         mock.get("/api/networks").mock(return_value=httpx.Response(200, json=[]))
-        mock.get("/api/containers/pending-updates").mock(
-            return_value=httpx.Response(200, json=[])
-        )
-        mock.get("/api/host").mock(
-            return_value=httpx.Response(200, json={"hostname": "forge"})
-        )
+        mock.get("/api/containers/pending-updates").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/host").mock(return_value=httpx.Response(200, json={"hostname": "forge"}))
         mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )

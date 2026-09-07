@@ -63,8 +63,8 @@ Those three are exposed as arguments, defaulting to `pull=True`, `build=False`,
 `force_recreate=False` — the values the tool previously hardcoded:
 
 ```python
-stack_action("searxng", "deploy")                # compose up -d --pull always
-stack_action("searxng", "deploy", pull=False)    # compose up -d
+stack_action("searxng", "deploy")  # compose up -d --pull always
+stack_action("searxng", "deploy", pull=False)  # compose up -d
 ```
 
 `pull=True` becomes `--pull always`, which re-resolves every image and can recreate

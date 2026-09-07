@@ -103,9 +103,7 @@ class DockhandClient:
                 "(e.g. '1'). Check DOCKHAND_DEFAULT_ENV or the environment_id argument."
             )
 
-    async def poll_job(
-        self, job_id: str, *, timeout: float = 120.0, interval: float = 1.0
-    ) -> dict:
+    async def poll_job(self, job_id: str, *, timeout: float = 120.0, interval: float = 1.0) -> dict:
         """Poll ``GET /api/jobs/{job_id}`` until the job reaches a terminal state.
 
         Dockhand action endpoints (stack deploy/start/stop/restart, container

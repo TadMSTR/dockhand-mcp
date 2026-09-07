@@ -37,12 +37,11 @@ def _env_of(route):
 # Read tools default the env and send ?env=
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_list_stacks_sends_default_env(mock_env):
     with respx.mock(base_url=ENDPOINT) as mock:
-        route = mock.get("/api/stacks").mock(
-            return_value=httpx.Response(200, json=STACKS_RESPONSE)
-        )
+        route = mock.get("/api/stacks").mock(return_value=httpx.Response(200, json=STACKS_RESPONSE))
 
         result = await server.list_stacks()
 
@@ -54,9 +53,7 @@ async def test_list_stacks_sends_default_env(mock_env):
 @pytest.mark.asyncio
 async def test_list_stacks_arg_overrides_env(mock_env):
     with respx.mock(base_url=ENDPOINT) as mock:
-        route = mock.get("/api/stacks").mock(
-            return_value=httpx.Response(200, json=STACKS_RESPONSE)
-        )
+        route = mock.get("/api/stacks").mock(return_value=httpx.Response(200, json=STACKS_RESPONSE))
 
         await server.list_stacks(environment_id="2")
 
@@ -86,9 +83,7 @@ async def test_list_stacks_no_env_returns_error_and_makes_no_call(monkeypatch):
     monkeypatch.delenv("DOCKHAND_DEFAULT_ENV", raising=False)
 
     with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
-        route = mock.get("/api/stacks").mock(
-            return_value=httpx.Response(200, json=STACKS_RESPONSE)
-        )
+        route = mock.get("/api/stacks").mock(return_value=httpx.Response(200, json=STACKS_RESPONSE))
 
         result = await server.list_stacks()
 
@@ -100,6 +95,7 @@ async def test_list_stacks_no_env_returns_error_and_makes_no_call(monkeypatch):
 # ---------------------------------------------------------------------------
 # stack_action: env, deploy body, async job polling
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_stack_action_deploy_sends_body_env_and_polls_result(mock_env):
@@ -145,6 +141,7 @@ async def test_stack_action_restart_sends_no_body(mock_env):
 # always` and re-resolves every image — the likely cause of the unexpected
 # librechat recreates. These assert the flags reach the body verbatim.
 
+
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
     [
@@ -176,9 +173,7 @@ async def test_stack_action_deploy_flags_reach_the_body(mock_env, kwargs, expect
 @pytest.mark.parametrize("action", ["start", "stop", "restart"])
 @pytest.mark.parametrize("flag", ["pull", "build", "force_recreate"])
 @pytest.mark.asyncio
-async def test_stack_action_rejects_deploy_flags_on_bodyless_actions(
-    mock_env, action, flag
-):
+async def test_stack_action_rejects_deploy_flags_on_bodyless_actions(mock_env, action, flag):
     """Silently dropping the flag would report it as honoured when Dockhand
     never received it — the route sends no body at all."""
     with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
@@ -186,9 +181,7 @@ async def test_stack_action_rejects_deploy_flags_on_bodyless_actions(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
 
-        result = await server.stack_action(
-            stack_name="searxng", action=action, **{flag: False}
-        )
+        result = await server.stack_action(stack_name="searxng", action=action, **{flag: False})
 
         assert flag in result["error"]
         assert "deploy" in result["error"]
@@ -208,9 +201,7 @@ async def test_stack_action_deploy_is_not_polled(mock_env):
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
 
-        result = await server.stack_action(
-            stack_name="searxng", action="deploy", pull=False
-        )
+        result = await server.stack_action(stack_name="searxng", action="deploy", pull=False)
 
         assert jobs.call_count == 0
         assert result["success"] is True
@@ -244,6 +235,7 @@ async def test_stack_action_rejects_unknown_action(mock_env):
 # container_action: env in query, remove uses DELETE
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_container_action_start_sends_env(mock_env):
     with respx.mock(base_url=ENDPOINT) as mock:
@@ -273,6 +265,7 @@ async def test_container_action_remove_uses_delete_with_env(mock_env):
 # ---------------------------------------------------------------------------
 # check_updates + update_container: env location and body
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_check_updates_sends_env_and_returns_the_final_result(mock_env):
@@ -310,6 +303,7 @@ async def test_check_updates_sends_env_and_returns_the_final_result(mock_env):
 #
 # These replacements are written against openapi-v1.0.46.json's contract for
 # POST /api/containers/batch-update, not against what the code does.
+
 
 @pytest.mark.asyncio
 async def test_update_container_posts_batch_update(mock_env):
@@ -429,7 +423,11 @@ async def test_update_container_flags_an_empty_result_set(mock_env):
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(
                 200,
-                json={"success": True, "results": [], "summary": {"total": 0, "success": 0, "failed": 0}},
+                json={
+                    "success": True,
+                    "results": [],
+                    "summary": {"total": 0, "success": 0, "failed": 0},
+                },
             )
         )
 
