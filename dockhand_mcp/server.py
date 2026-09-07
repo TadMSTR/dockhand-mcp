@@ -483,17 +483,29 @@ def _redact_container_env(payload: Any) -> Any:
 async def inspect_container(container_id: str, environment_id: Optional[str] = None) -> dict:
     """Inspect a container's full Docker configuration — image, env, mounts, network.
 
-    **Treat the output as sensitive.** Environment variables whose name looks like
-    a credential (``*_TOKEN``, ``*_PASSWORD``, ``*_SECRET``, ``*_KEY``, ``*API_KEY*``
-    and similar) are replaced with ``***REDACTED***`` by this server before the
-    payload is returned, as are credentials embedded in URL values. That redaction
-    is the only protection there is: Dockhand documents masking on this route, but
-    it resolves a compose project's registered secrets and forge supplies env from
-    env_file paths Dockhand cannot read, so in practice nothing is masked upstream.
+    **Treat the output as sensitive.** This server redacts before returning, and
+    that redaction is the only protection there is: Dockhand documents masking on
+    this route, but it resolves a compose project's registered secrets and forge
+    supplies env from env_file paths Dockhand cannot read, so nothing is masked
+    upstream in practice.
 
-    The redaction covers Config.Env and Config.Labels. It does **not** cover
-    Config.Cmd, Entrypoint or Args — a credential passed on a command line is
-    still returned in the clear.
+    Redaction is layered, because matching on key names alone missed real secrets
+    (``POSTGRES_PWD``, ``DFLY_requirepass``):
+
+    - a credential-shaped key (``*PASS*``, ``*PWD*``, ``*TOKEN*``, ``*SECRET*``,
+      ``*_KEY*``, ``*AUTH*`` and similar) is redacted unless its value cannot be a
+      secret at all — a flag, a number, or empty;
+    - **any** value that is a long opaque token is redacted whatever its key is
+      called, which is what catches a credential under a name nobody predicted;
+    - credentials inside URL values (``postgres://user:pass@host``) and inside URL
+      query strings (``?access_token=…``) are stripped.
+
+    Values that cannot encode a credential stay readable, so config flags, ports,
+    paths and plain URLs are still legible.
+
+    It covers Config.Env and Config.Labels. It does **not** cover Config.Cmd,
+    Entrypoint or Args — a credential passed on a command line is still returned
+    in the clear.
 
     Args:
         container_id: Container ID from list_containers.

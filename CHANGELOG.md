@@ -56,7 +56,24 @@ covering it asserted the exact request body that made it fail.
   `list_volumes`, `list_networks`, `get_pending_updates`, `get_host_info`. All
   built against `openapi-v1.0.46.json`. (vikunja#724)
 - **Secret redaction in `inspect_container`, as the only control rather than a
-  second one.** The design assumed `GET /api/containers/{id}` masks a compose
+  second one — matching on key names, then on value shape.**
+
+  The first implementation matched key names only, and the security audit
+  defeated it against live deployed containers: `POSTGRES_PWD`
+  (temporal-admin-tools) and `DFLY_requirepass` (langfuse-dragonfly) both
+  returned real passwords in the clear, because `"PWD"` is not `"PASSWD"` and
+  `"requirepass"` contains neither `"password"` nor `"passwd"`. The first is the
+  sharpest case: that container sets `SQL_PASSWORD` to the *same* value, so one
+  copy came back redacted and an identical copy did not. Scanning all 123
+  containers rather than fixing only the two named found four more —
+  `RABBITMQ_DEFAULT_PASS`, `NEO4J_AUTH`, `REDIS_AUTH`, `CREDS_IV`.
+
+  So redaction is layered rather than being another round of names: a
+  credential-shaped key redacts unless its value is structurally incapable of
+  being a secret; **any** long opaque value redacts whatever its key is called;
+  and credentials inside URL values and URL query strings are stripped. Measured
+  against all 1679 live environment variables: 443 redacted, 1236 still readable.
+ The design assumed `GET /api/containers/{id}` masks a compose
   project's secrets while `/inspect` does not, and treated in-server redaction as
   belt-and-braces. Measured against the live host, the masking does not fire at
   all: **322 of 322** secret-shaped environment variables across 123 containers

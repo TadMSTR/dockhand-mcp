@@ -186,11 +186,25 @@ environment variables across 123 containers came back unmasked — Dockhand mask
 knows as a project's registered secrets, and stacks that supply environment from `env_file`
 paths Dockhand cannot read have none registered.
 
-So this server does its own redaction before returning anything: environment variables whose
-**name** looks like a credential (`*_TOKEN`, `*_PASSWORD`, `*_SECRET`, `*_KEY`, `*API_KEY*`
-and similar) are replaced with `***REDACTED***`, and credentials embedded in URL **values**
-(`postgres://user:pass@host`) are stripped separately, since a bland `*_URL` key defeats any
-name-based test.
+So this server does its own redaction before returning anything. Matching on key names alone
+proved insufficient — a security audit found `POSTGRES_PWD` and `DFLY_requirepass` returning
+real passwords in the clear, and a follow-up scan of all 123 containers found four more. A
+name list can only ever be current up to the last time someone tried to defeat it, so the
+redaction is layered:
+
+| Rule | Effect |
+|---|---|
+| Credential-shaped **key** (`*PASS*`, `*PWD*`, `*TOKEN*`, `*SECRET*`, `*_KEY*`, `*AUTH*`, …) | Redacted, unless the value cannot be a secret at all — a flag, a number, or empty |
+| Any **value** that is a long opaque token | Redacted whatever the key is called — this is what catches an unpredicted name |
+| Credentials in URL values (`postgres://user:pass@host`) and query strings (`?access_token=…`) | Stripped |
+
+Values that cannot encode a credential stay readable, so config flags, ports, paths and plain
+URLs remain legible. Measured against 1679 live environment variables: 443 redacted, 1236
+visible, every known secret caught.
+
+One deliberate cost: a path *to* a key, such as `TEMPORAL_TLS_KEY=/etc/temporal/tls.key`, is
+redacted too. Letting the path rule run ahead of the key rule is exactly what leaked a
+`WEBHOOK_SECRET` whose value was a URL.
 
 It covers `Config.Env` and `Config.Labels`. It does **not** cover `Config.Cmd`, `Entrypoint`
 or `Args` — a credential passed on a command line is still returned in the clear. Treat the
