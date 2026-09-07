@@ -33,6 +33,7 @@ def patch_run(monkeypatch):
 # Transport switch
 # ---------------------------------------------------------------------------
 
+
 def test_stdio_is_the_default_and_calls_plain_run(patch_run, monkeypatch):
     monkeypatch.setattr(server, "_TRANSPORT", "stdio")
     server.main()
@@ -58,6 +59,7 @@ def test_http_runs_with_loopback_host_port_path(patch_run, monkeypatch):
 # ---------------------------------------------------------------------------
 # HTTP fail-closed guards
 # ---------------------------------------------------------------------------
+
 
 def test_http_without_bearer_refuses_to_start(patch_run, monkeypatch):
     monkeypatch.setattr(server, "_TRANSPORT", "http")
@@ -88,6 +90,7 @@ def test_http_nonloopback_host_refuses_to_start(patch_run, monkeypatch):
 # Auth wiring (evaluated at import time)
 # ---------------------------------------------------------------------------
 
+
 def test_bearer_env_builds_static_token_verifier(monkeypatch):
     """With DOCKHAND_MCP_BEARER set, the FastMCP server is constructed with a
     StaticTokenVerifier so the HTTP endpoint rejects unauthenticated callers."""
@@ -110,6 +113,4 @@ def test_no_bearer_means_no_auth(monkeypatch):
 
 
 def test_tool_tracing_middleware_registered():
-    assert any(
-        type(m).__name__ == "ToolTracingMiddleware" for m in server.mcp.middleware
-    )
+    assert any(type(m).__name__ == "ToolTracingMiddleware" for m in server.mcp.middleware)

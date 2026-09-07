@@ -51,6 +51,70 @@ JOB_DONE_FAILURE = {
     "result": {"success": False, "error": "Failed to restart compose stack"},
 }
 
+# POST /api/containers/batch-update answers SYNCHRONOUSLY with a per-container
+# result set and no jobId — shapes taken from openapi-v1.0.46.json, whose 200
+# schema requires {success, results, summary} and, per result,
+# {containerId, containerName, success} with an optional {error}.
+#
+# The returned containerId depends on what happened, measured live against
+# Dockhand v1.0.46 on 2026-09-07:
+#   success -> the NEW id, because the container was recreated
+#   skip/failure -> the requested id, because nothing was recreated
+# Fixtures below reproduce that asymmetry. A success fixture echoing the
+# requested id back would be a shape Dockhand never actually produces.
+REQUESTED_ID = "abc123def456"
+RECREATED_ID = "f00dcafe9999"
+
+BATCH_UPDATE_SUCCESS = {
+    "success": True,
+    "results": [
+        {"containerId": RECREATED_ID, "containerName": "nginx", "success": True},
+    ],
+    "summary": {"total": 1, "success": 1, "failed": 0},
+}
+
+# A container labelled dockhand.update=false comes back as a SUCCESS carrying an
+# error string. Kept as its own fixture rather than a flag on the one above:
+# telling this apart from a real update is the whole point of the skip handling.
+# The error text is the literal string Dockhand returned in the live check.
+BATCH_UPDATE_SKIPPED = {
+    "success": True,
+    "results": [
+        {
+            "containerId": REQUESTED_ID,
+            "containerName": "nginx",
+            "success": True,
+            "error": "Skipped - dockhand.update=false label",
+        },
+    ],
+    "summary": {"total": 1, "success": 1, "failed": 0},
+}
+
+BATCH_UPDATE_FAILED = {
+    "success": False,
+    "results": [
+        {
+            "containerId": REQUESTED_ID,
+            "containerName": "nginx",
+            "success": False,
+            "error": "Failed to pull image nginx:latest",
+        },
+    ],
+    "summary": {"total": 1, "success": 0, "failed": 1},
+}
+
+# More results than ids sent — the only case where id matching decides the
+# answer. Dockhand echoes the full 64-char id for a 12-char request, so the
+# match has to tolerate the prefix.
+BATCH_UPDATE_MULTI = {
+    "success": True,
+    "results": [
+        {"containerId": "999888777666" + "0" * 52, "containerName": "other", "success": True},
+        {"containerId": REQUESTED_ID + "0" * 52, "containerName": "nginx", "success": True},
+    ],
+    "summary": {"total": 2, "success": 2, "failed": 0},
+}
+
 ACTIVITY_RESPONSE = {
     "events": [
         {

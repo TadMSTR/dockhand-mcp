@@ -21,6 +21,7 @@ from .conftest import (
 # Auth injection
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_bearer_token_sent_on_get(mock_env):
     """GET requests include Authorization: Bearer <token>."""
@@ -56,6 +57,7 @@ async def test_bearer_token_sent_on_post(mock_env):
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_4xx_raises_dockhand_error(mock_env):
@@ -112,6 +114,7 @@ async def test_error_with_message_field(mock_env):
 # Environment resolution (arg -> DOCKHAND_DEFAULT_ENV -> error)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_resolve_env_uses_default(mock_env):
     """resolve_env falls back to DOCKHAND_DEFAULT_ENV and returns an int."""
@@ -161,6 +164,7 @@ async def test_resolve_env_non_integer_raises_config_error(monkeypatch):
 # ---------------------------------------------------------------------------
 # Async job polling
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_poll_job_returns_success_result(mock_env):
@@ -236,13 +240,13 @@ async def test_poll_job_timeout_returns_failure(mock_env):
     """poll_job returns a synthetic failure (not a hang) if the job never finishes."""
     with respx.mock(base_url=ENDPOINT) as mock:
         mock.get(f"/api/jobs/{JOB_DONE_SUCCESS['id']}").mock(
-            return_value=httpx.Response(200, json={"id": JOB_DONE_SUCCESS["id"], "status": "running"})
+            return_value=httpx.Response(
+                200, json={"id": JOB_DONE_SUCCESS["id"], "status": "running"}
+            )
         )
 
         client = DockhandClient()
-        result = await client.poll_job(
-            JOB_DONE_SUCCESS["id"], timeout=0.0, interval=0.01
-        )
+        result = await client.poll_job(JOB_DONE_SUCCESS["id"], timeout=0.0, interval=0.01)
 
         assert result["success"] is False
         assert "did not complete" in result["error"]

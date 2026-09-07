@@ -141,9 +141,8 @@ def _fake_influx_module(*, raise_on_init=None, client=None):
 # configure_logging — phases 2 and 3
 # ---------------------------------------------------------------------------
 
-def test_configure_logging_attaches_only_the_file_handler(
-    tmp_path, monkeypatch, restore_logging
-):
+
+def test_configure_logging_attaches_only_the_file_handler(tmp_path, monkeypatch, restore_logging):
     """Phase 3: one sink, not two.
 
     A stderr StreamHandler *and* a FileHandler were both attached, so under PM2
@@ -158,9 +157,9 @@ def test_configure_logging_attaches_only_the_file_handler(
     handlers = logging.getLogger().handlers
     assert len(handlers) == 1
     assert isinstance(handlers[0], logging.FileHandler)
-    assert not any(
-        type(h) is logging.StreamHandler for h in handlers
-    ), "stderr handler must be dropped when LOG_FILE is writable"
+    assert not any(type(h) is logging.StreamHandler for h in handlers), (
+        "stderr handler must be dropped when LOG_FILE is writable"
+    )
     handlers[0].close()
 
 
@@ -225,6 +224,7 @@ def test_third_party_logger_list_covers_the_measured_noise():
 # Phase 1 — InfluxDB sentinel
 # ---------------------------------------------------------------------------
 
+
 def test_get_influx_unset_env_is_silently_disabled(monkeypatch, rec_log):
     """A *missing* env var is the intended disabled path and must not warn."""
     monkeypatch.delenv("INFLUXDB_URL", raising=False)
@@ -262,7 +262,9 @@ def test_get_influx_failure_warns_once_and_is_not_retried(monkeypatch, rec_log):
 
 def test_get_influx_failure_warning_carries_no_credentials(monkeypatch, rec_log):
     """The one place this build could introduce a leak."""
-    mod = _fake_influx_module(raise_on_init=ValueError(f"bad host {SECRET_URL} token {SECRET_TOKEN}"))
+    mod = _fake_influx_module(
+        raise_on_init=ValueError(f"bad host {SECRET_URL} token {SECRET_TOKEN}")
+    )
     monkeypatch.setitem(sys.modules, "influxdb_client_3", mod)
     monkeypatch.setenv("INFLUXDB_URL", SECRET_URL)
     monkeypatch.setenv("INFLUXDB_TOKEN", SECRET_TOKEN)
@@ -304,6 +306,7 @@ def test_get_influx_success_is_cached(monkeypatch, rec_log):
 # Phase 1 — NATS sentinel
 # ---------------------------------------------------------------------------
 
+
 async def test_get_nats_unset_env_is_silently_disabled(monkeypatch, rec_log):
     monkeypatch.delenv("NATS_URL", raising=False)
 
@@ -342,6 +345,7 @@ async def test_get_nats_failure_warns_once_and_is_not_retried(monkeypatch, rec_l
 # ---------------------------------------------------------------------------
 # emit_metric — write/publish failures are warned once, not swallowed forever
 # ---------------------------------------------------------------------------
+
 
 async def test_emit_metric_write_failure_warns_once(monkeypatch, rec_log):
     class _Client:
@@ -394,9 +398,7 @@ async def test_emit_metric_writes_a_point_and_publishes(monkeypatch, rec_log):
     monkeypatch.setattr(observability, "_nats_client", _NatsClient())
     monkeypatch.setenv("NATS_SUBJECT_PREFIX", "dockhand")
 
-    await observability.emit_metric(
-        "dockhand_tool", {"tool": "list_stacks"}, {"duration_s": 0.5}
-    )
+    await observability.emit_metric("dockhand_tool", {"tool": "list_stacks"}, {"duration_s": 0.5})
 
     assert len(written) == 1
     assert published[0][0] == "dockhand.tool.list_stacks"
@@ -407,6 +409,7 @@ async def test_emit_metric_writes_a_point_and_publishes(monkeypatch, rec_log):
 # ---------------------------------------------------------------------------
 # Tracing
 # ---------------------------------------------------------------------------
+
 
 def test_get_tracer_returns_none_without_endpoint(monkeypatch, rec_log):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
@@ -482,11 +485,7 @@ def test_only_the_otel_sites_are_exempt_from_the_no_exc_info_rule():
     import pathlib
 
     src = pathlib.Path(observability.__file__).read_text()
-    exempt = [
-        ln.strip()
-        for ln in src.splitlines()
-        if "exc_info=True" in ln
-    ]
+    exempt = [ln.strip() for ln in src.splitlines() if "exc_info=True" in ln]
     assert len(exempt) == 2, exempt
     assert all("otel_" in ln for ln in exempt), exempt
 
@@ -494,6 +493,7 @@ def test_only_the_otel_sites_are_exempt_from_the_no_exc_info_rule():
 # ---------------------------------------------------------------------------
 # nats-py's own reconnect machinery — the larger half of the 2,867-line flood
 # ---------------------------------------------------------------------------
+
 
 def test_nats_connect_options_are_fail_fast():
     """The library defaults (60 attempts x 2 s, reporting each one) are what made
@@ -523,9 +523,9 @@ async def test_get_nats_passes_fail_fast_options_and_our_error_cb(monkeypatch, r
     await observability._get_nats()
 
     assert seen["allow_reconnect"] is False
-    assert seen["max_reconnect_attempts"] == observability._NATS_CONNECT_OPTS[
-        "max_reconnect_attempts"
-    ]
+    assert (
+        seen["max_reconnect_attempts"] == observability._NATS_CONNECT_OPTS["max_reconnect_attempts"]
+    )
     # Without our own error_cb, nats-py's default logs at ERROR on the
     # `nats.aio.client` logger — which the WARNING demotion does not silence.
     assert seen["error_cb"] is observability._nats_error_cb
@@ -555,9 +555,7 @@ async def test_get_nats_is_bounded_by_a_deadline(monkeypatch, rec_log):
 async def test_nats_error_cb_warns_once_and_leaks_nothing(rec_log):
     """This callback replaces the one that produced 2,867 lines."""
     for _ in range(50):
-        await observability._nats_error_cb(
-            ConnectionRefusedError(f"cannot reach {SECRET_URL}")
-        )
+        await observability._nats_error_cb(ConnectionRefusedError(f"cannot reach {SECRET_URL}"))
 
     assert [e for e, _ in rec_log.warnings] == ["nats_transport_error"]
     assert rec_log.warnings[0][1]["error_class"] == "ConnectionRefusedError"

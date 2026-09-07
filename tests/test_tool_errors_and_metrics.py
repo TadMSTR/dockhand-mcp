@@ -23,7 +23,13 @@ import respx
 from dockhand_mcp import client as client_module
 from dockhand_mcp import server
 
-from .conftest import ENDPOINT, JOB_DONE_SUCCESS, JOB_QUEUED, STACKS_RESPONSE
+from .conftest import (
+    BATCH_UPDATE_SUCCESS,
+    ENDPOINT,
+    JOB_DONE_SUCCESS,
+    JOB_QUEUED,
+    STACKS_RESPONSE,
+)
 
 # Every tool, with the arguments needed to reach get_client(). The action tools
 # validate their arguments before building a client, so the values must be valid
@@ -38,6 +44,16 @@ ALL_TOOLS = [
     ("check_updates", {}),
     ("update_container", {"container_id": "abc123"}),
     ("scan_image", {"image_name": "nginx:latest"}),
+    # Phase 6 read-only surface.
+    ("inspect_container", {"container_id": "abc123"}),
+    ("get_container_logs", {"container_id": "abc123"}),
+    ("get_container_stats", {"container_id": "abc123"}),
+    ("get_stack_compose", {"stack_name": "searxng"}),
+    ("list_images", {}),
+    ("list_volumes", {}),
+    ("list_networks", {}),
+    ("get_pending_updates", {}),
+    ("get_host_info", {}),
 ]
 
 
@@ -64,13 +80,20 @@ def collect_metrics(monkeypatch):
 # Phase 6 — a config error is returned, never raised
 # ---------------------------------------------------------------------------
 
-def test_all_nine_tools_are_covered_by_the_config_error_test():
-    """Guards the roster. A tenth tool added without a row here would otherwise
-    reintroduce the bug in the one place nothing checks."""
+
+def test_every_tool_is_covered_by_the_config_error_test():
+    """Guards the roster. A tool added without a row in ALL_TOOLS would otherwise
+    reintroduce the bug in the one place nothing checks.
+
+    Deliberately not asserted against a hardcoded count — a number in the test
+    name goes stale the moment the surface grows, and updating it is the step
+    that gets skipped.
+    """
     registered = {
         name
         for name, obj in vars(server).items()
-        if callable(obj) and getattr(obj, "__module__", "") == server.__name__
+        if callable(obj)
+        and getattr(obj, "__module__", "") == server.__name__
         and not name.startswith("_")
         and asyncio.iscoroutinefunction(obj)
         and name not in {"main"}
@@ -156,9 +179,7 @@ def slow_job(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stack_action_duration_includes_the_job_poll(
-    mock_env, slow_job, collect_metrics
-):
+async def test_stack_action_duration_includes_the_job_poll(mock_env, slow_job, collect_metrics):
     with respx.mock(base_url=ENDPOINT) as mock:
         mock.post("/api/stacks/searxng/restart").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
@@ -178,33 +199,43 @@ async def test_stack_action_duration_includes_the_job_poll(
 
 
 @pytest.mark.asyncio
-async def test_update_container_duration_includes_the_job_poll(
-    mock_env, slow_job, collect_metrics
-):
-    with respx.mock(base_url=ENDPOINT) as mock:
-        mock.post("/api/containers/abc123/update").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+async def test_update_container_does_not_poll_a_job(mock_env, collect_metrics):
+    """Retargeted from the old job-poll timing test (vikunja#574 P5).
+
+    update_container used to post to /api/containers/{id}/update and poll the
+    jobId it returned. It now posts to batch-update, which is synchronous and
+    documents no jobId — so the property worth pinning is the inverse: no job is
+    polled, and duration_s therefore collapses onto post_duration_s. The
+    poll-spanning invariant itself is still covered, by
+    test_stack_action_duration_includes_the_job_poll above, on a route that
+    genuinely returns one.
+    """
+    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
+        )
+        jobs = mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
+            return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
 
-        await server.update_container(container_id="abc123")
+        await server.update_container(container_id="abc123def456")
 
+    assert jobs.call_count == 0
     assert len(collect_metrics) == 1
     _, tags, fields = collect_metrics[0]
     assert tags == {"tool": "update_container"}
-    assert fields["duration_s"] >= POLL_DELAY
-    assert fields["post_duration_s"] < POLL_DELAY
+    assert fields["duration_s"] >= fields["post_duration_s"]
 
 
 # ---------------------------------------------------------------------------
 # Phase 5 — get_health and get_activity emit a metric like the other seven
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_get_health_emits_a_metric(mock_env, collect_metrics):
     with respx.mock(base_url=ENDPOINT) as mock:
-        mock.get("/api/health").mock(
-            return_value=httpx.Response(200, json={"status": "ok"})
-        )
+        mock.get("/api/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
 
         await server.get_health()
 
@@ -252,12 +283,30 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
         mock.post("/api/containers/check-updates").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
-        mock.post("/api/containers/abc123/update").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+        mock.post("/api/containers/batch-update").mock(
+            return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
         )
         mock.post("/api/images/scan").mock(
             return_value=httpx.Response(200, json={"imageName": "nginx:latest"})
         )
+        # Phase 6 read-only surface.
+        mock.get("/api/containers/abc123").mock(
+            return_value=httpx.Response(200, json={"Id": "abc123", "Config": {"Env": []}})
+        )
+        mock.get("/api/containers/abc123/logs").mock(
+            return_value=httpx.Response(200, json={"logs": ""})
+        )
+        mock.get("/api/containers/abc123/stats").mock(
+            return_value=httpx.Response(200, json={"cpu": 0.0})
+        )
+        mock.get("/api/stacks/searxng/compose").mock(
+            return_value=httpx.Response(200, json={"content": "services: {}"})
+        )
+        mock.get("/api/images").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/volumes").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/networks").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/containers/pending-updates").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/host").mock(return_value=httpx.Response(200, json={"hostname": "forge"}))
         mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
