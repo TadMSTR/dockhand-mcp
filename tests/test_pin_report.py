@@ -229,6 +229,7 @@ BAD_REPORTS = [
     pytest.param(_without("schema_version"), "schema_mismatch", id="schema-absent"),
     pytest.param('{"schema_version": 1, "generated": ', "unreadable", id="truncated-json"),
     pytest.param("[]", "unreadable", id="not-an-object"),
+    pytest.param("[" * 100_000 + "]" * 100_000, "unreadable", id="deeply-nested-json"),
     pytest.param(_without("containers"), "unreadable", id="no-containers"),
     pytest.param(_without("generated"), "unreadable", id="no-generated"),
     pytest.param(_generated("2026-09-30T22:42:42"), "unreadable", id="naive-generated"),
@@ -311,7 +312,7 @@ async def test_max_age_is_configurable(mock_env, monkeypatch, tmp_path):
     ] == "ok"
 
 
-@pytest.mark.parametrize("raw", ["abc", "0", "-5", "nan"])
+@pytest.mark.parametrize("raw", ["abc", "0", "-5", "nan", "inf", "1e999"])
 def test_invalid_max_age_falls_back_to_default(monkeypatch, raw):
     monkeypatch.setenv("DIGEST_PIN_MAX_AGE_H", raw)
     assert pin_report.max_age_hours() == pin_report.DEFAULT_MAX_AGE_H

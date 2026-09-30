@@ -17,6 +17,7 @@ The only status added here is ``not_assessed``.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -69,7 +70,7 @@ def max_age_hours() -> float:
         value = float(raw)
     except ValueError:
         value = 0.0
-    if not value > 0:
+    if not (value > 0 and math.isfinite(value)):
         log.warning("digest_pin_max_age_invalid", value=raw, using=DEFAULT_MAX_AGE_H)
         return DEFAULT_MAX_AGE_H
     return value
@@ -93,7 +94,8 @@ def read_report(now: Optional[datetime] = None) -> PinReport:
 
     try:
         data = json.loads(raw)
-    except ValueError:
+    # RecursionError: deeply nested JSON well under the size cap.
+    except (ValueError, RecursionError):
         return PinReport("unreadable", reason="report is not valid JSON")
     if not isinstance(data, dict):
         return PinReport("unreadable", reason="report top level is not an object")
