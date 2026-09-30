@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.6.0] — 2026-09-30
+
+A digest-pinned container no longer reads as "no update" without anyone
+having checked. Dockhand resolves `repo@sha256:X` to `X`, so every pin reports
+`hasUpdate: false` — including one whose tag has since moved.
+
+### Added
+
+- **`pin_assessment` on every digest-pinned row** of `check_updates` and
+  `get_pending_updates`, read from the report a separate scheduled digest-pin
+  checker writes to disk: `{status, detail, report_generated, report_state}`.
+  The report's status passes through verbatim; the only status added here is
+  `not_assessed`. No registry access and no second copy of the checker's logic.
+- **`digest_pins` summary** on both responses:
+  `{report_state, report_generated, report_age_hours, report_reason, pinned,
+  by_status}`, with each pinned row in exactly one bucket.
+- `DIGEST_PIN_REPORT` and `DIGEST_PIN_MAX_AGE_H` (default 30 h). The path is
+  env-only, never a tool argument.
+
+### Behaviour
+
+- **Fails closed.** A missing, stale, unreadable or non-schema-1 report makes
+  every pinned row `not_assessed`, and the tool still returns Dockhand's data.
+  So does a container absent from the report, one running a different image
+  from the one the report assessed, or an image-ref fallback that maps to
+  conflicting statuses.
+- Dockhand's own fields (`hasUpdate`, `hasImageUpdate`, `updatesFound`) are
+  untouched; floating-tag rows get no overlay.
+- Both docstrings now say that `hasUpdate: false` on a pin means "cannot tell".
+- A report schema bump (v2) turns all pins `not_assessed` until this reader
+  is updated.
+
+### Tests
+
+- Fixtures are frozen real data: Dockhand 1.0.46 `check_updates` /
+  `get_pending_updates` rows and schema-v1 report rows, one per observed status.
+- A sabotage run (reader returning an empty `ok` report on every error path)
+  turned all 16 fail-closed tests red.
+
 ## [0.5.0] — 2026-09-07
 
 Closes the open-ticket set against this repo. The headline is that

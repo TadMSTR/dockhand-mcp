@@ -39,6 +39,8 @@ from .observability import (
     get_tracer,
     shutdown_observability,
 )
+from .pin_report import overlay as _pin_overlay
+from .pin_report import read_report as _read_pin_report
 
 configure_logging()
 log = structlog.get_logger(__name__)
@@ -711,6 +713,13 @@ async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
 
     Reports what a previous check_updates run found; it does not run a new check.
 
+    Digest-pinned images (``repo@sha256:...``) essentially never appear here:
+    Dockhand cannot see updates for a pin, so it never flags one. **An empty or
+    pin-free list does not mean the pinned containers are current.** Use
+    check_updates and read each pinned row's ``pin_assessment``. Any pinned row
+    that does appear gets the same ``pin_assessment`` overlay, and the response
+    carries the same ``digest_pins`` summary (see check_updates).
+
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
             Required on this route — unlike the other listings, Dockhand documents
@@ -729,10 +738,13 @@ async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
         # tool exists to avoid. Verified against the live response, not guessed.
         updates = data if isinstance(data, list) else data.get("pendingUpdates", [])
         available = sum(1 for u in updates if isinstance(u, dict) and u.get("hasImageUpdate"))
+        digest_pins = _pin_overlay(updates, "currentImage", "containerName", _read_pin_report())
         log.info(
             "get_pending_updates",
             total=len(updates),
             available=available,
+            pinned=digest_pins["pinned"],
+            pin_report_state=digest_pins["report_state"],
             duration_s=round(duration, 3),
         )
         await emit_metric(
@@ -744,6 +756,7 @@ async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
             "pendingUpdates": updates,
             "total": len(updates),
             "withUpdateAvailable": available,
+            "digest_pins": digest_pins,
         }
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("get_pending_updates", e)
@@ -954,6 +967,27 @@ async def check_updates(environment_id: Optional[str] = None) -> dict:
     Expect this to take a while — it contacts a registry per image. Use
     get_pending_updates afterwards to read the result back without re-running it.
 
+    **Digest-pinned images.** For a row whose ``imageName`` contains
+    ``@sha256:``, ``hasUpdate: false`` means *Dockhand cannot tell*, not
+    "current": Dockhand resolves the pin to itself, so it never reports an update.
+    Such rows carry a ``pin_assessment`` taken from the scheduled digest-pin
+    report, and that is the answer:
+
+        pin_assessment: {status, detail, report_generated, report_state}
+
+    ``status`` is the report's status verbatim (``current``, ``update``,
+    ``drift``, ``unresolvable``, ``exempt``, ...), or ``not_assessed`` when there
+    is no trustworthy answer: the report is missing, stale, unreadable or of an
+    unknown schema, the container is not in it, or it runs a different image
+    from the one the report assessed. Treat ``not_assessed`` as unknown, never
+    as current. Dockhand's own fields
+    (``hasUpdate``, ``updatesFound``) are passed through unchanged, so
+    ``updatesFound`` still excludes pins. Floating-tag rows get no overlay.
+
+    The top-level ``digest_pins`` summarises the overlay:
+    ``{report_state, report_generated, report_age_hours, report_reason, pinned,
+    by_status}``, where every pinned row is counted in exactly one status.
+
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
             Without it Dockhand fails with 'No environment specified'.
@@ -965,12 +999,20 @@ async def check_updates(environment_id: Optional[str] = None) -> dict:
             client, "/api/containers/check-updates", params={"env": env}
         )
         data = resp.json()
+        digest_pins = None
+        if isinstance(data, dict):
+            digest_pins = _pin_overlay(
+                data.get("results"), "imageName", "containerName", _read_pin_report()
+            )
+            data["digest_pins"] = digest_pins
         # Not job_id: this route returns {total, updatesFound, results} directly
         # and every real call logged an empty job id for the life of the service.
         log.info(
             "check_updates",
-            checked=data.get("total"),
-            updates_found=data.get("updatesFound"),
+            checked=data.get("total") if isinstance(data, dict) else None,
+            updates_found=data.get("updatesFound") if isinstance(data, dict) else None,
+            pinned=digest_pins["pinned"] if digest_pins else None,
+            pin_report_state=digest_pins["report_state"] if digest_pins else None,
             duration_s=round(duration, 3),
         )
         await emit_metric(

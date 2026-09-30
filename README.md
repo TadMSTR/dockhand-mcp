@@ -25,7 +25,7 @@ Gives an AI agent structured access to Docker container and stack management on 
 | `get_pending_updates` | Containers with an image update available, from the last check |
 | `container_action` | start / stop / restart / pause / unpause / remove a container |
 | `stack_action` | start / stop / restart / deploy a stack |
-| `check_updates` | Run an image update check across all containers (synchronous) |
+| `check_updates` | Run an image update check across all containers (synchronous). Pinned rows carry a `pin_assessment` — see [Digest-Pinned Images](#digest-pinned-images-pin_assessment) |
 | `update_container` | Re-pull a container's image and recreate it in place |
 | `scan_image` | Trivy/Grype CVE scan by image name |
 | `get_activity` | Recent Dockhand operations log |
@@ -157,6 +157,53 @@ For a **digest-pinned** image — which forge uses widely — this re-pulls the 
 recreates. That is a recreate, not an upgrade: change the pin first if you want a new
 version.
 
+## Digest-Pinned Images: `pin_assessment`
+
+Dockhand cannot detect updates for a digest pin. It resolves `repo@sha256:X` to `X`, so a
+pinned container **always** reads `hasUpdate: false`, whether or not its tag has moved. For a
+pinned row that means *Dockhand cannot tell*, not *current*. Pinned images also never show up
+in `get_pending_updates`, because Dockhand only lists rows it has flagged.
+
+The answer comes from a separate scheduled digest-pin checker, which compares each pin against
+the registry (index vs platform-manifest aware) and writes a JSON report to disk. This server
+reads that report and **never** contacts a registry or runs the checker itself. It only
+overlays the report onto Dockhand's response:
+
+- Every row whose image ref contains `@sha256:` gets
+  `pin_assessment: {status, detail, report_generated, report_state}`.
+- Floating-tag rows get no `pin_assessment` key at all.
+- Dockhand's own fields (`hasUpdate`, `hasImageUpdate`, `updatesFound`, …) are passed through
+  unchanged, so `updatesFound` still excludes pins.
+- The top level gains
+  `digest_pins: {report_state, report_generated, report_age_hours, report_reason, pinned, by_status}`.
+  Every pinned row is counted in exactly one `by_status` bucket.
+
+`status` is the report's status **verbatim**: `current`, `update`, `exempt`,
+`exempt-expired`, `unresolvable`, `error`, `known-stale`, `known-stale-expired`, `drift`
+(the running image differs from its compose declaration) or `undeclared`. An unrecognised
+status is passed through rather than rejected. The one status this server adds is
+**`not_assessed`**. It means *unknown*, never *current*, and it is used when:
+
+| `report_state` | Why every pinned row is `not_assessed` |
+|---|---|
+| `missing` | No report at the configured path |
+| `unreadable` | Not JSON, not an object, no `containers` list, or `generated` is missing, naive, unparseable or in the future |
+| `schema_mismatch` | `schema_version` is anything other than `1` |
+| `stale` | `generated` is older than `DIGEST_PIN_MAX_AGE_H` (default 30 h: a daily run plus slack). The checker deliberately leaves the old report in place when it cannot reach docker or the registry, so age is the staleness signal |
+
+With `report_state: ok`, a single row is still `not_assessed` when the container is not in
+the report, when it runs a different image from the one the report assessed (it was recreated
+on one side of the report run), or when it is matched only by image ref and that ref maps to
+conflicting statuses. Rows are joined by container name first and fall back to the exact
+image ref.
+
+A report problem never fails the tool. The Dockhand data always comes back.
+
+**Schema versions.** This server reads report schema **1** only, and fails closed on any
+other version. A checker change that bumps the schema (for example, a new status for a pin
+whose digest no longer exists in the registry) will turn every pinned row `not_assessed` until
+this reader is updated for the new version.
+
 ## Known Limitations
 
 Three things this server cannot do, none of which are fixable in this repo.
@@ -237,6 +284,8 @@ find a secret in a log line, since there is no key to match on. This is the same
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | — | Enables OTEL traces when set |
 | `NATS_URL` | no | — | Enables NATS event publishing when set |
 | `NATS_SUBJECT_PREFIX` | no | `dockhand` | NATS subject prefix |
+| `DIGEST_PIN_REPORT` | no | `~/.local/state/digest-pin-check/report.json` | Digest-pin report to overlay. Env only; deliberately not a tool argument. See [Digest-Pinned Images](#digest-pinned-images-pin_assessment) |
+| `DIGEST_PIN_MAX_AGE_H` | no | `30` | Report age, in hours, beyond which every pinned row is `not_assessed` (`stale`). Invalid or non-positive values fall back to 30 |
 
 ## Deployment (forge, PM2)
 
