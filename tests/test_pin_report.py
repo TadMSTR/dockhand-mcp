@@ -384,6 +384,26 @@ async def test_ambiguous_image_ref_is_not_assessed(mock_env, monkeypatch, tmp_pa
     assert "conflicting statuses ['undeclared', 'update']" in a["detail"]
 
 
+@pytest.mark.parametrize("status", [["update"], {"s": "update"}])
+@pytest.mark.asyncio
+async def test_unhashable_status_on_the_ref_fallback_does_not_raise(
+    mock_env, monkeypatch, tmp_path, status
+):
+    """A list/object status reached through the image-ref fallback must not
+    raise out of the tool (CodeRabbit CR-01 on PR #13)."""
+    report = _fresh(REPORT_V1)
+    row = _row(report, "firecrawl-v2-postgres")
+    row["container"] = "renamed"
+    row["status"] = status
+    _write(monkeypatch, tmp_path, report)
+
+    result = await _check_updates(copy.deepcopy(CHECK_UPDATES_LIVE))
+
+    a = _by_name(result)["firecrawl-v2-postgres"]["pin_assessment"]
+    assert (a["status"], a["detail"]) == ("not_assessed", "report row has no status")
+    assert _strip_overlay(result) == CHECK_UPDATES_LIVE
+
+
 # ---------------------------------------------------------------------------
 # get_pending_updates
 # ---------------------------------------------------------------------------

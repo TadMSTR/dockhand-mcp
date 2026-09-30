@@ -198,7 +198,9 @@ def assess(report: PinReport, name: Any, ref: str) -> dict:
     # Fall back to the image ref only when it is unambiguous. The same ref can
     # sit on several rows with different statuses (e.g. one container drifted,
     # another is an ephemeral CI container reported as undeclared).
-    statuses = {r.get("status") for r in rows}
+    # Non-string statuses collapse to None before hashing: a JSON list or object
+    # here would otherwise raise out of set() and fail the whole tool call.
+    statuses = {r.get("status") if isinstance(r.get("status"), str) else None for r in rows}
     if len(statuses) != 1:
         return _assessment(
             report,
