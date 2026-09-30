@@ -33,6 +33,10 @@ DEFAULT_REPORT_PATH = Path.home() / ".local" / "state" / "digest-pin-check" / "r
 
 NOT_ASSESSED = "not_assessed"
 
+# The real report is ~50 KB for ~50 containers. Anything this large is not a
+# report, and is not parsed.
+MAX_REPORT_BYTES = 4 * 1024 * 1024
+
 # Allowance for clock skew between the checker and this process. A `generated`
 # further in the future than this is not a timestamp we can reason about.
 _FUTURE_SKEW_S = 300
@@ -79,6 +83,8 @@ def read_report(now: Optional[datetime] = None) -> PinReport:
     """Read and validate the report. Never raises."""
     path = report_path()
     try:
+        if path.stat().st_size > MAX_REPORT_BYTES:
+            return PinReport("unreadable", reason=f"report exceeds {MAX_REPORT_BYTES} bytes")
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return PinReport("missing", reason=f"no report at {path}")
@@ -97,7 +103,7 @@ def read_report(now: Optional[datetime] = None) -> PinReport:
     if schema != SUPPORTED_SCHEMA or isinstance(schema, bool):
         return PinReport(
             "schema_mismatch",
-            reason=f"report schema_version {schema!r}; this server reads {SUPPORTED_SCHEMA}",
+            reason=f"report schema_version {repr(schema)[:40]}; this server reads {SUPPORTED_SCHEMA}",
         )
 
     generated = data.get("generated")

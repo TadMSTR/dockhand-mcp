@@ -275,6 +275,28 @@ async def test_unreadable_path_does_not_raise_out_of_the_tool(mock_env, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_oversized_report_is_not_parsed(mock_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(pin_report, "MAX_REPORT_BYTES", 1024)
+    _write(monkeypatch, tmp_path, _fresh(REPORT_V1))
+
+    result = await _check_updates(copy.deepcopy(CHECK_UPDATES_LIVE))
+
+    assert result["digest_pins"]["report_state"] == "unreadable"
+    assert result["digest_pins"]["report_reason"] == "report exceeds 1024 bytes"
+    assert result["digest_pins"]["by_status"] == {"not_assessed": 3}
+
+
+@pytest.mark.asyncio
+async def test_schema_value_echoed_in_the_reason_is_bounded(mock_env, monkeypatch, tmp_path):
+    _write(monkeypatch, tmp_path, _schema("x" * 5000))
+
+    result = await _check_updates(copy.deepcopy(CHECK_UPDATES_LIVE))
+
+    assert result["digest_pins"]["report_state"] == "schema_mismatch"
+    assert len(result["digest_pins"]["report_reason"]) < 100
+
+
+@pytest.mark.asyncio
 async def test_max_age_is_configurable(mock_env, monkeypatch, tmp_path):
     _write(monkeypatch, tmp_path, _fresh(REPORT_V1, timedelta(hours=3)))
 
