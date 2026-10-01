@@ -24,6 +24,7 @@ Provides MCP tools to inspect, control, and update Docker containers and stacks 
 dockhand_mcp/
   server.py          FastMCP server — 9 tools
   client.py          DockhandClient — async httpx wrapper, get_client() factory
+  pin_report.py      Digest-pin report reader + pin_assessment overlay (file read only)
   observability.py   configure_logging() (structlog JSON), emit_metric() (InfluxDB)
 tests/               pytest with respx mocks
 pyproject.toml
@@ -48,6 +49,8 @@ pyproject.toml
 | `LOG_LEVEL`            | No       | Logging verbosity (default: INFO)                              |
 | `LOG_FILE`             | No       | Single log sink; stderr only if unwritable or empty            |
 | `INFLUXDB_URL`         | No       | InfluxDB endpoint for metrics                                 |
+| `DIGEST_PIN_REPORT`    | No       | Digest-pin report path (default `~/.local/state/digest-pin-check/report.json`) |
+| `DIGEST_PIN_MAX_AGE_H` | No       | Report staleness limit in hours (default 30)                   |
 
 ## Key architecture decisions
 
@@ -55,6 +58,8 @@ pyproject.toml
 - **`DockhandError` / `DockhandConfigError`** — `client.py` raises these typed exceptions. Tool handlers catch them and return structured error responses rather than letting exceptions propagate.
 - **Environment resolution** — every Dockhand endpoint reads the environment from a `?env=<int>` query param and silently returns `[]` (or fails the async job) when it is missing. `DockhandClient.resolve_env(environment_id)` centralises the `arg → DOCKHAND_DEFAULT_ENV → DockhandConfigError` precedence; all list/action tools call it and pass `params={"env": ...}`. Never send env in a JSON body — the handlers ignore it there.
 - **Async job polling** — stack actions and `update_container` return `{"jobId": ...}` and run in the background. `DockhandClient.poll_job()` polls `GET /api/jobs/{jobId}` to a terminal state and returns `{success, output|error}`; `server._finalize_job()` wires this into the tools so callers get a real verdict, not an opaque handle. `deploy` additionally requires a JSON body (`{pull, build, forceRecreate}`) or the handler 500s.
+
+- **Digest-pin overlay fails closed** — `check_updates` / `get_pending_updates` attach `pin_assessment` to rows whose image ref contains `@sha256:`, taken from a report written by a separate scheduled checker. A missing, stale, unreadable or non-v1 report makes every pinned row `not_assessed`; never default a pin to `current`, and never modify Dockhand's own fields. The report path is env-only — do not add it as a tool argument. Do not add registry access here; the checker owns that logic. Test fixtures in `tests/fixtures/` are frozen real data — do not hand-write shapes.
 
 ## Testing
 

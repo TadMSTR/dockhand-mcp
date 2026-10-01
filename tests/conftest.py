@@ -156,3 +156,16 @@ def mock_env(monkeypatch):
     monkeypatch.setenv("DOCKHAND_ENDPOINT", ENDPOINT)
     monkeypatch.setenv("DOCKHAND_API_TOKEN", API_TOKEN)
     monkeypatch.setenv("DOCKHAND_DEFAULT_ENV", DEFAULT_ENV)
+
+
+@pytest.fixture(autouse=True)
+def isolate_pin_report(monkeypatch, tmp_path):
+    """Point the digest-pin report at a path that does not exist, for every test.
+
+    The default path is a real per-user state file. Without this, any test that
+    calls check_updates or get_pending_updates on a host running the checker
+    would read that host's live report. Tests that want a report write one and
+    set DIGEST_PIN_REPORT themselves.
+    """
+    monkeypatch.setenv("DIGEST_PIN_REPORT", str(tmp_path / "no-report.json"))
+    monkeypatch.delenv("DIGEST_PIN_MAX_AGE_H", raising=False)

@@ -1,0 +1,13 @@
+{
+  "environmentId": 1,
+  "pendingUpdates": [
+    {
+      "containerId": "21b6b3b5b48e0a28d5b1728174ed561be300e5ea6225f83dd160b2aad1a4fc86",
+      "containerName": "agent-postgres",
+      "currentImage": "postgres:17-alpine",
+      "checkedAt": "2026-09-30T22:37:29.544Z",
+      "hasImageUpdate": true,
+      "newerVersion": null
+    }
+  ]
+}

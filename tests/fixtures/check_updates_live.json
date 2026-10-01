@@ -1,0 +1,62 @@
+{
+  "total": 119,
+  "updatesFound": 25,
+  "results": [
+    {
+      "containerId": "cb2e7817d6871472e87fbe1dda1cabee8b96257ee424142a7924ff677b0dd4af",
+      "containerName": "firecrawl-v2-postgres",
+      "imageName": "ghcr.io/firecrawl/nuq-postgres:latest@sha256:4ca6718b2cef40404b046db5cd37ae45db3e44d1a5750c80522f3587a5b193d5",
+      "hasUpdate": false,
+      "currentDigest": "sha256:4ca6718b2cef40404b046db5cd37ae45db3e44d1a5750c80522f3587a5b193d5",
+      "systemContainer": null,
+      "updateDisabled": false
+    },
+    {
+      "containerId": "21b6b3b5b48e0a28d5b1728174ed561be300e5ea6225f83dd160b2aad1a4fc86",
+      "containerName": "agent-postgres",
+      "imageName": "postgres:17-alpine",
+      "hasUpdate": true,
+      "currentDigest": "postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",
+      "newDigest": "sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
+      "systemContainer": null,
+      "updateDisabled": false
+    },
+    {
+      "containerId": "a21ea1a3ff2c82243153676ae7b90d5c47b1f6d902b9e4c473f7b18c47b03359",
+      "containerName": "vikunja",
+      "imageName": "vikunja/vikunja:2.5.0",
+      "hasUpdate": false,
+      "currentDigest": "vikunja/vikunja@sha256:22df4c1bc8843c28d383bc5f52b59e7b601bf5f6560b36b29c0a500833c77fa3",
+      "systemContainer": null,
+      "updateDisabled": false
+    },
+    {
+      "containerId": "5adf4d1dd4c671b6f60182fc067bbf012413a9cbcbffd135903520f70620d528",
+      "containerName": "agent-dragonfly",
+      "imageName": "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0",
+      "hasUpdate": false,
+      "currentDigest": "docker.dragonflydb.io/dragonflydb/dragonfly@sha256:0fa01a2b929e704c7a9300d23e7f52002ebd39e90996fb8bb63826aed92fa06f",
+      "error": "Could not query registry",
+      "systemContainer": null,
+      "updateDisabled": false
+    },
+    {
+      "containerId": "d74b2ff5d1057316690b63aa670463b98141f16a2f718e9e3677c21eaa4b4d54",
+      "containerName": "kiwix",
+      "imageName": "ghcr.io/kiwix/kiwix-serve@sha256:7431be257ac0b0b6f14633ef088774f6d5122246940b594b3017a70169058b08",
+      "hasUpdate": false,
+      "currentDigest": "sha256:7431be257ac0b0b6f14633ef088774f6d5122246940b594b3017a70169058b08",
+      "systemContainer": null,
+      "updateDisabled": false
+    },
+    {
+      "containerId": "55b4fb09b4110399f23fc0e16e10dd1d28c8a3621f74438e17bae9fde9d83ceb",
+      "containerName": "bentopdf",
+      "imageName": "ghcr.io/alam00000/bentopdf@sha256:eaeea1e447205a79cb61d7efdc6966f37311dc1bc9c36a3a5c897bf79107c2c3",
+      "hasUpdate": false,
+      "currentDigest": "sha256:eaeea1e447205a79cb61d7efdc6966f37311dc1bc9c36a3a5c897bf79107c2c3",
+      "systemContainer": null,
+      "updateDisabled": false
+    }
+  ]
+}

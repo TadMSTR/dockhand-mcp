@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "generated": "2026-09-30T22:42:42.956533+00:00",
+  "host_platform": "linux/amd64",
+  "platform": "linux/amd64",
+  "compose_root": "/srv/compose",
+  "declarations_total": 103,
+  "digest_pinned": 44,
+  "floating_tag": 59,
+  "counts": {
+    "current": 14,
+    "update": 11,
+    "exempt": 0,
+    "exempt-expired": 0,
+    "unresolvable": 19,
+    "error": 0,
+    "known-stale": 0,
+    "known-stale-expired": 0,
+    "drift": 5,
+    "undeclared": 0
+  },
+  "findings": [
+    {
+      "declaration": "ghcr.io/firecrawl/firecrawl:2.11.162@sha256:cc27dadc6eb259b077fcd478df794cd2d41c51616599c0ca161055a587bcc95c",
+      "repo": "ghcr.io/firecrawl/firecrawl",
+      "tag": "2.11.162",
+      "pinned_digest": "sha256:cc27dadc6eb259b077fcd478df794cd2d41c51616599c0ca161055a587bcc95c",
+      "current_digest": "sha256:cc27dadc6eb259b077fcd478df794cd2d41c51616599c0ca161055a587bcc95c",
+      "status": "current",
+      "detail": "pin matches ghcr.io/firecrawl/firecrawl:2.11.162 (platform-manifest via index -> linux/amd64)",
+      "sources": [
+        "firecrawl-v2/docker-compose.yml"
+      ]
+    },
+    {
+      "declaration": "ghcr.io/firecrawl/nuq-postgres:latest@sha256:4ca6718b2cef40404b046db5cd37ae45db3e44d1a5750c80522f3587a5b193d5",
+      "repo": "ghcr.io/firecrawl/nuq-postgres",
+      "tag": "latest",
+      "pinned_digest": "sha256:4ca6718b2cef40404b046db5cd37ae45db3e44d1a5750c80522f3587a5b193d5",
+      "current_digest": "sha256:a582bc385702f3a93cafe2d8c749d55b6676e7c2761e94923113badf7af4b54f",
+      "status": "update",
+      "detail": "ghcr.io/firecrawl/nuq-postgres:latest now resolves elsewhere (platform-manifest via index -> linux/amd64)",
+      "sources": [
+        "firecrawl-v2/docker-compose.yml"
+      ]
+    },
+    {
+      "declaration": "excalidraw/excalidraw@sha256:f7ee194addd607bf831d2af0f0a34463dd4225e426cf35199ef0b12a803398e9",
+      "repo": "excalidraw/excalidraw",
+      "tag": null,
+      "pinned_digest": "sha256:f7ee194addd607bf831d2af0f0a34463dd4225e426cf35199ef0b12a803398e9",
+      "current_digest": null,
+      "status": "unresolvable",
+      "detail": "bare digest pin with no tag to re-resolve and no exemption; add a tag (repo:tag@sha256:...) or record an exemption",
+      "sources": [
+        "tools/docker-compose.yml"
+      ]
+    }
+  ],
+  "containers": [
+    {
+      "container": "adblock-proxy",
+      "running_ref": "ghcr.io/tadmstr/searxng-mcp-adblock-proxy:v3.30.0@sha256:01f54277d4b033f014957f2d5dd68b2f14fe0c0fac76bd8c97598c2059661067",
+      "declared_ref": "ghcr.io/tadmstr/searxng-mcp-adblock-proxy:v3.30.0@sha256:01f54277d4b033f014957f2d5dd68b2f14fe0c0fac76bd8c97598c2059661067",
+      "compose_file": "searxng/docker-compose.yml",
+      "service": "adblock-proxy",
+      "status": "current",
+      "detail": "pin matches ghcr.io/tadmstr/searxng-mcp-adblock-proxy:v3.30.0 (manifest-to-manifest (single-platform tag))",
+      "declaration_status": "current"
+    },
+    {
+      "container": "firecrawl-v2-postgres",
+      "running_ref": "ghcr.io/firecrawl/nuq-postgres:latest@sha256:4ca6718b2cef40404b046db5cd37ae45db3e44d1a5750c80522f3587a5b193d5",
+      "declared_ref": "ghcr.io/firecrawl/nuq-postgres:latest@sha256:4ca6718b2cef40404b046db5cd37ae45db3e44d1a5750c80522f3587a5b193d5",
+      "compose_file": "firecrawl-v2/docker-compose.yml",
+      "service": "firecrawl-v2-postgres",
+      "status": "update",
+      "detail": "ghcr.io/firecrawl/nuq-postgres:latest now resolves elsewhere (platform-manifest via index -> linux/amd64)",
+      "declaration_status": "update"
+    },
+    {
+      "container": "byparr",
+      "running_ref": "ghcr.io/thephaseless/byparr@sha256:874f719518f617d03a60e03411fc5d090647e1a877041e81f8dc965927c7deb6",
+      "declared_ref": "ghcr.io/thephaseless/byparr@sha256:874f719518f617d03a60e03411fc5d090647e1a877041e81f8dc965927c7deb6",
+      "compose_file": "searxng/docker-compose.yml",
+      "service": "byparr",
+      "status": "unresolvable",
+      "detail": "bare digest pin with no tag to re-resolve and no exemption; add a tag (repo:tag@sha256:...) or record an exemption",
+      "declaration_status": "unresolvable"
+    },
+    {
+      "container": "bentopdf",
+      "running_ref": "ghcr.io/alam00000/bentopdf@sha256:eaeea1e447205a79cb61d7efdc6966f37311dc1bc9c36a3a5c897bf79107c2c3",
+      "declared_ref": "ghcr.io/alam00000/bentopdf@sha256:165113f4579cc61ea353ad0597ed510cc2101ef879ec5e91875a3df0c0b219a0",
+      "compose_file": "tools/docker-compose.yml",
+      "service": "bentopdf",
+      "status": "drift",
+      "detail": "running ghcr.io/alam00000/bentopdf@sha256:eaeea1e447205a79cb61d7efdc6966f37311dc1bc9c36a3a5c897bf79107c2c3, but tools/docker-compose.yml declares ghcr.io/alam00000/bentopdf@sha256:165113f4579cc61ea353ad0597ed510cc2101ef879ec5e91875a3df0c0b219a0; recreate the container",
+      "declaration_status": "unresolvable"
+    },
+    {
+      "container": "wp_01M3T9W6HEV4SW1KCCAGJJSZA7",
+      "running_ref": "python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
+      "declared_ref": null,
+      "compose_file": null,
+      "service": null,
+      "status": "undeclared",
+      "detail": "no compose labels; cannot tell what this container should run",
+      "declaration_status": null
+    }
+  ]
+}
