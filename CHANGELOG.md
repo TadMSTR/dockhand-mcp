@@ -32,6 +32,23 @@ having checked. Dockhand resolves `repo@sha256:X` to `X`, so every pin reports
 - A report schema bump (v2) turns all pins `not_assessed` until this reader
   is updated.
 
+### Security (found in review before release)
+
+- **Four ways a bad report could fail the whole tool call**, each fixed with a
+  red-then-green regression test:
+  - an unhashable `status` (JSON list or object) reached through the image-ref
+    fallback (CodeRabbit);
+  - deeply nested JSON, which raises `RecursionError`, not `ValueError`, well
+    under the size cap;
+  - a NUL in the report path (security audit; not reachable via the env var
+    itself, fixed defensively);
+  - and, as a boundary guarantee rather than another special case, a logged
+    catch-all in `read_report()` so that anything unforeseen fails closed.
+- Reports over 4 MiB are not parsed. The `schema_mismatch` reason echoes at
+  most 40 characters of the file's value.
+- `DIGEST_PIN_MAX_AGE_H=inf` silently disabled staleness. Non-finite values now
+  fall back to 30 h.
+
 ### Tests
 
 - Fixtures are frozen real data: Dockhand 1.0.46 `check_updates` /

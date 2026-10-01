@@ -276,6 +276,40 @@ async def test_unreadable_path_does_not_raise_out_of_the_tool(mock_env, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_nul_in_report_path_does_not_raise_out_of_the_tool(mock_env, monkeypatch, tmp_path):
+    """Path.stat() raises ValueError, not OSError, on an embedded NUL (audit L-1).
+
+    Not reachable through DIGEST_PIN_REPORT itself: os.environ refuses a NUL and
+    an execve environment cannot carry one. So the path is injected directly,
+    and this pins the handler, not a live route.
+    """
+    monkeypatch.setattr(pin_report, "report_path", lambda: tmp_path / "rep\x00ort.json")
+
+    result = await _check_updates(copy.deepcopy(CHECK_UPDATES_LIVE))
+
+    assert result["digest_pins"]["report_state"] == "unreadable"
+    assert result["digest_pins"]["report_reason"] == "cannot read report: ValueError"
+    assert _strip_overlay(result) == CHECK_UPDATES_LIVE
+
+
+@pytest.mark.asyncio
+async def test_unforeseen_reader_error_fails_closed(mock_env, monkeypatch):
+    """The boundary catch-all: an exception no specific handler anticipated."""
+
+    def boom(now):
+        raise KeyError("unforeseen")
+
+    monkeypatch.setattr(pin_report, "_read_report", boom)
+
+    result = await _check_updates(copy.deepcopy(CHECK_UPDATES_LIVE))
+
+    assert result["digest_pins"]["report_state"] == "unreadable"
+    assert result["digest_pins"]["report_reason"] == "unexpected error reading report: KeyError"
+    assert result["digest_pins"]["by_status"] == {"not_assessed": 3}
+    assert _strip_overlay(result) == CHECK_UPDATES_LIVE
+
+
+@pytest.mark.asyncio
 async def test_oversized_report_is_not_parsed(mock_env, monkeypatch, tmp_path):
     monkeypatch.setattr(pin_report, "MAX_REPORT_BYTES", 1024)
     _write(monkeypatch, tmp_path, _fresh(REPORT_V1))

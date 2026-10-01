@@ -81,7 +81,23 @@ def _name(value: Any) -> Optional[str]:
 
 
 def read_report(now: Optional[datetime] = None) -> PinReport:
-    """Read and validate the report. Never raises."""
+    """Read and validate the report. Never raises.
+
+    Three raise paths were found in review after the specific handlers were
+    written (unhashable status, nested JSON, a NUL in the path). The catch-all
+    makes "never raises" a property of this boundary rather than of having found
+    them all: anything unforeseen fails closed and is logged.
+    """
+    try:
+        return _read_report(now)
+    except Exception as e:  # noqa: BLE001 - fail closed, never fail the tool
+        log.error("digest_pin_report_unexpected_error", error_type=type(e).__name__)
+        return PinReport(
+            "unreadable", reason=f"unexpected error reading report: {type(e).__name__}"
+        )
+
+
+def _read_report(now: Optional[datetime]) -> PinReport:
     path = report_path()
     try:
         if path.stat().st_size > MAX_REPORT_BYTES:
@@ -89,7 +105,8 @@ def read_report(now: Optional[datetime] = None) -> PinReport:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return PinReport("missing", reason=f"no report at {path}")
-    except (OSError, UnicodeDecodeError) as e:
+    # ValueError: a NUL in DIGEST_PIN_REPORT ("embedded null character in path").
+    except (OSError, UnicodeDecodeError, ValueError) as e:
         return PinReport("unreadable", reason=f"cannot read report: {type(e).__name__}")
 
     try:
