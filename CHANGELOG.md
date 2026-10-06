@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- **Advisory floors for anyio (>=4.14.2), PyJWT (>=2.15.0) and urllib3 (>=2.8.0)** in the
+  existing vikunja#228 block. All three are transitive, and the deployed venv carried
+  anyio 4.13.0, PyJWT 2.13.0 and urllib3 2.7.0 (vikunja#1012). CI's `pip-audit --strict .`
+  re-resolves fresh, so it stayed green while the venv had 18 CVEs: these floors make any
+  resolve, including the redeploy, land at or above the fixes.
+
 ## [0.6.0] — 2026-09-30
 
 A digest-pinned container no longer reads as "no update" without anyone
