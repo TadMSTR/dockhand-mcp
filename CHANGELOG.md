@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-06
+
+Security release. No application code changed. **Deploying it needs a reinstall
+(`pip install -e .`), not a restart.** The floors below only bind a fresh resolve.
+
 ### Security
 - **Advisory floors for anyio (>=4.14.2), PyJWT (>=2.15.0) and urllib3 (>=2.8.0)** in the
   existing vikunja#228 block. All three are transitive, and the deployed venv carried
