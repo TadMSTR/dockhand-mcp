@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+- **FastMCP 3 → 4** (`fastmcp>=4.0.11,<5`, previously `>=3.3,<4`). This brings MCP SDK
+  1.30 → 2.3. It supersedes Dependabot #10, which widened only the ceiling (`>=3.3,<5`). That
+  would have let CI and a fresh install land on different majors, the vikunja#611 gap this
+  bound exists to close. No application code changed. Measured on 4.0.11 against 3.4.8:
+  - the suite is identical, 216 passed on both;
+  - all 18 tools have identical `description`, `inputSchema`, `outputSchema` and
+    `annotations`, diffed from `list_tools()`, so scoped-mcp's frozen tool list is unaffected;
+  - argument validation is identical, and an unknown keyword is rejected on both;
+  - over HTTP with `StaticTokenVerifier`, a missing token gets 401, the right token lists
+    18 tools, and a wrong token is rejected.
+- **Dropped the `mcp>=1.28.1` advisory floor** from the vikunja#228 block. FastMCP 4 requires
+  `mcp>=2.0.0`, which is above it. That's the block's own removal rule.
+
+**Deploying needs a reinstall (`pip install -e .`), not a restart.** A restart keeps
+FastMCP 3.4.8 in the venv.
+
 ## [0.6.1] — 2026-10-06
 
 Security release. No application code changed. **Deploying it needs a reinstall
