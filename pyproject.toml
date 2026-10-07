@@ -8,10 +8,12 @@ version = "0.6.1"
 description = "FastMCP Python MCP server wrapping the Dockhand REST API"
 requires-python = ">=3.11"
 dependencies = [
-    # Ceiling, not just a floor: production runs 3.x, and ">=2.11" let CI resolve
-    # a major that is never deployed — the vikunja#611 class of gap where the
-    # tested tree and the running tree are different code.
-    "fastmcp>=3.3,<4",
+    # Floor AND ceiling on the same major: production runs 4.x, and a floor left
+    # on 3.x would let CI and a fresh resolve land on different majors — the
+    # vikunja#611 class of gap where the tested tree and the running tree are
+    # different code. Dependabot's #10 widened only the ceiling (>=3.3,<5); this
+    # moves both, so there is one major to test and one to deploy.
+    "fastmcp>=4.0.11,<5",
     "httpx>=0.27",
     "pydantic>=2.0",
     "structlog>=24.0",
@@ -24,7 +26,6 @@ dependencies = [
     "anyio>=4.14.2",            # PYSEC-2026-4024/4025
     "cryptography>=49.0.0",     # PYSEC-2026-3552/3553/3554, GHSA-537c-gmf6-5ccf
     "joserfc>=1.6.8",           # PYSEC-2026-2528
-    "mcp>=1.28.1",              # PYSEC-2026-3481/3482/3483
     "PyJWT>=2.15.0",            # PYSEC-2026-4140..4152, CVE-2026-102275
     "urllib3>=2.8.0",           # PYSEC-2026-4175/4176/4177
     "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j
