@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-07
+
+FastMCP 4. No application code changed, and the tool surface is identical. **Deploying it
+needs a reinstall (`pip install -e .`), not a restart.** A restart keeps FastMCP 3.4.8 in
+the venv.
+
 ### Changed
+- **CI actions:** actions/checkout 4.3.1 → 7.0.1 (#8), actions/setup-python 5.6.0 → 7.0.0
+  (#9). Action majors stay un-ignored in Dependabot on purpose (see `dependabot.yml`).
 - **FastMCP 3 → 4** (`fastmcp>=4.0.11,<5`, previously `>=3.3,<4`). This brings MCP SDK
   1.30 → 2.3. It supersedes Dependabot #10, which widened only the ceiling (`>=3.3,<5`). That
   would have let CI and a fresh install land on different majors, the vikunja#611 gap this
@@ -15,9 +23,6 @@
     18 tools, and a wrong token is rejected.
 - **Dropped the `mcp>=1.28.1` advisory floor** from the vikunja#228 block. FastMCP 4 requires
   `mcp>=2.0.0`, which is above it. That's the block's own removal rule.
-
-**Deploying needs a reinstall (`pip install -e .`), not a restart.** A restart keeps
-FastMCP 3.4.8 in the venv.
 
 ## [0.6.1] — 2026-10-06
 

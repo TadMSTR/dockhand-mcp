@@ -25,3 +25,7 @@ updates:
     # ignoring majors would pin this repo to actions/checkout v4 indefinitely.
     # An action major is also a CI-only change: it cannot reach production, and
     # it fails visibly in the PR rather than silently at runtime.
+    # SECURITY[accepted]: no semver-major ignore here, and that's deliberate (reasons above). It
+    # was re-confirmed when checkout 4->7 and setup-python 5->7 merged (#8/#9). A plan item to
+    # add the ignore "to match the other repos" was declined. Audit: 2026-10-07/
+    # dependabot-sweep-2026-10-p4-deferred-majors (F-02, Info).
