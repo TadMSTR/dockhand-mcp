@@ -21,6 +21,8 @@ from .conftest import (
     BATCH_UPDATE_SUCCESS,
     CONTAINERS_RESPONSE,
     ENDPOINT,
+    FULL_ID,
+    INSPECT_FOR_RESOLVE,
     JOB_DONE_FAILURE,
     JOB_DONE_SUCCESS,
     JOB_QUEUED,
@@ -98,59 +100,92 @@ async def test_list_stacks_no_env_returns_error_and_makes_no_call(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stack_action_deploy_sends_body_env_and_polls_result(mock_env):
+async def test_stack_action_deploy_sends_body_and_env(mock_env):
+    # deploy answers directly (1.0.55 spec: no jobId on this route). The old
+    # version of this test mocked a jobId here, a shape deploy never returns.
     with respx.mock(base_url=ENDPOINT) as mock:
         deploy = mock.post("/api/stacks/searxng/deploy").mock(
+            return_value=httpx.Response(200, json={"success": True, "output": " Started \n"})
+        )
+
+        result = await server.stack_action(
+            acknowledge_env_log=True, stack_name="searxng", action="deploy"
+        )
+
+        # env in query
+        assert _env_of(deploy) == "1"
+        # deploy body fixes the empty-body 500; pull defaults to False (#671)
+        body = json.loads(deploy.calls[0].request.content)
+        assert body == {"pull": False, "build": False, "forceRecreate": False}
+        assert result["success"] is True
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+@pytest.mark.asyncio
+async def test_stack_action_start_stop_poll_the_job(mock_env, action):
+    """start and stop return {jobId} (1.0.55 spec, required), and the tool
+    surfaces the job's verdict rather than the opaque handle."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        route = mock.post(f"/api/stacks/searxng/{action}").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
         mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
 
-        result = await server.stack_action(stack_name="searxng", action="deploy")
+        result = await server.stack_action(
+            acknowledge_env_log=True, stack_name="searxng", action=action
+        )
 
-        # env in query
-        assert _env_of(deploy) == "1"
-        # deploy body fixes the empty-body 500
-        body = json.loads(deploy.calls[0].request.content)
-        assert body == {"pull": True, "build": False, "forceRecreate": False}
-        # polled job result is surfaced, not the opaque jobId
+        assert _env_of(route) == "1"
+        assert route.calls[0].request.content == b""
         assert result["jobId"] == JOB_QUEUED["jobId"]
         assert result["success"] is True
         assert "Started" in result["output"]
 
 
 @pytest.mark.asyncio
-async def test_stack_action_restart_sends_no_body(mock_env):
-    with respx.mock(base_url=ENDPOINT) as mock:
+async def test_stack_action_restart_sends_no_body_and_is_not_polled(mock_env):
+    """restart answers directly, like deploy. The 1.0.55 spec documents
+    POST /api/stacks/{name}/restart as an SSE stream with no jobId schema, and
+    with Accept: application/json it returned {success, output} on a canary
+    stack (2026-10-25). The previous fixture mocked a jobId here, which
+    contradicted the docstring (vikunja#1239 item 3); the docstring was right."""
+    with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
         restart = mock.post("/api/stacks/searxng/restart").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+            return_value=httpx.Response(
+                200, json={"success": True, "output": " Container x Restarting \n"}
+            )
         )
-        mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
+        jobs = mock.route(method="GET", path__startswith="/api/jobs/").mock(
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
 
-        result = await server.stack_action(stack_name="searxng", action="restart")
+        result = await server.stack_action(
+            acknowledge_env_log=True, stack_name="searxng", action="restart"
+        )
 
         assert _env_of(restart) == "1"
         assert restart.calls[0].request.content == b""  # no JSON body
         assert result["success"] is True
+        assert jobs.call_count == 0
 
 
 # vikunja#671: deploy hardcoded pull=True, which becomes `compose up -d --pull
 # always` and re-resolves every image — the likely cause of the unexpected
-# librechat recreates. These assert the flags reach the body verbatim.
+# librechat recreates. 0.8.0 defaults pull to False. These assert the flags
+# reach the body verbatim.
 
 
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
     [
-        ({}, {"pull": True, "build": False, "forceRecreate": False}),
-        ({"pull": False}, {"pull": False, "build": False, "forceRecreate": False}),
-        ({"build": True}, {"pull": True, "build": True, "forceRecreate": False}),
+        ({}, {"pull": False, "build": False, "forceRecreate": False}),
+        ({"pull": True}, {"pull": True, "build": False, "forceRecreate": False}),
+        ({"build": True}, {"pull": False, "build": True, "forceRecreate": False}),
         (
             {"force_recreate": True},
-            {"pull": True, "build": False, "forceRecreate": True},
+            {"pull": False, "build": False, "forceRecreate": True},
         ),
         (
             {"pull": False, "build": True, "force_recreate": True},
@@ -165,7 +200,9 @@ async def test_stack_action_deploy_flags_reach_the_body(mock_env, kwargs, expect
             return_value=httpx.Response(200, json={"success": True, "output": "ok"})
         )
 
-        await server.stack_action(stack_name="searxng", action="deploy", **kwargs)
+        await server.stack_action(
+            acknowledge_env_log=True, stack_name="searxng", action="deploy", **kwargs
+        )
 
         assert json.loads(deploy.calls[0].request.content) == expected
 
@@ -181,7 +218,9 @@ async def test_stack_action_rejects_deploy_flags_on_bodyless_actions(mock_env, a
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
 
-        result = await server.stack_action(stack_name="searxng", action=action, **{flag: False})
+        result = await server.stack_action(
+            acknowledge_env_log=True, stack_name="searxng", action=action, **{flag: False}
+        )
 
         assert flag in result["error"]
         assert "deploy" in result["error"]
@@ -201,7 +240,9 @@ async def test_stack_action_deploy_is_not_polled(mock_env):
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
         )
 
-        result = await server.stack_action(stack_name="searxng", action="deploy", pull=False)
+        result = await server.stack_action(
+            acknowledge_env_log=True, stack_name="searxng", action="deploy", pull=False
+        )
 
         assert jobs.call_count == 0
         assert result["success"] is True
@@ -211,15 +252,19 @@ async def test_stack_action_deploy_is_not_polled(mock_env):
 async def test_stack_action_surfaces_job_failure(mock_env):
     """A job that finishes with success=false is reported as a failure, not a
     false success — this is the silent-failure gap that hid the missing env."""
+    # stop, not restart: stop is one of the two actions that returns a jobId
+    # (1.0.55 spec, POST /api/stacks/{name}/stop: {jobId} required).
     with respx.mock(base_url=ENDPOINT) as mock:
-        mock.post("/api/stacks/searxng/restart").mock(
+        mock.post("/api/stacks/searxng/stop").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
         mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
             return_value=httpx.Response(200, json=JOB_DONE_FAILURE)
         )
 
-        result = await server.stack_action(stack_name="searxng", action="restart")
+        result = await server.stack_action(
+            acknowledge_env_log=True, stack_name="searxng", action="stop"
+        )
 
         assert result["success"] is False
         assert "Failed to restart" in result["error"]
@@ -227,7 +272,9 @@ async def test_stack_action_surfaces_job_failure(mock_env):
 
 @pytest.mark.asyncio
 async def test_stack_action_rejects_unknown_action(mock_env):
-    result = await server.stack_action(stack_name="searxng", action="explode")
+    result = await server.stack_action(
+        acknowledge_env_log=True, stack_name="searxng", action="explode"
+    )
     assert "action must be one of" in result["error"]
 
 
@@ -309,6 +356,9 @@ async def test_check_updates_sends_env_and_returns_the_final_result(mock_env):
 async def test_update_container_posts_batch_update(mock_env):
     """The body is {containerIds: [id]} and env stays in the query string."""
     with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         route = mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
         )
@@ -317,7 +367,8 @@ async def test_update_container_posts_batch_update(mock_env):
 
         assert _env_of(route) == "1"
         body = json.loads(route.calls[0].request.content)
-        assert body == {"containerIds": ["abc123def456"]}
+        # The resolved full id, not what the caller typed.
+        assert body == {"containerIds": [FULL_ID]}
 
         # Unwrapped to the single container, not the batch envelope.
         assert result["success"] is True
@@ -335,6 +386,9 @@ async def test_update_container_never_calls_the_update_route(mock_env):
     never reached.
     """
     with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         broken = mock.post("/api/containers/abc123def456/update").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
@@ -355,6 +409,9 @@ async def test_update_container_surfaces_a_skip_distinctly(mock_env):
     """dockhand.update=false comes back as success+error; it must not read as an
     update that happened."""
     with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_SKIPPED)
         )
@@ -371,6 +428,9 @@ async def test_update_container_surfaces_a_skip_distinctly(mock_env):
 async def test_update_container_reports_a_real_failure(mock_env):
     """A genuine per-container failure keeps success=False and its error text."""
     with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_FAILED)
         )
@@ -391,6 +451,9 @@ async def test_update_container_returns_the_recreated_id(mock_env):
     worked. The single-result case must therefore not depend on an id match.
     """
     with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
         )
@@ -407,6 +470,9 @@ async def test_update_container_picks_our_result_from_several(mock_env):
     """With more results than ids sent, the right one is identified by id —
     tolerating the full 64-char form echoed for a 12-char request."""
     with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_MULTI)
         )
@@ -420,6 +486,9 @@ async def test_update_container_picks_our_result_from_several(mock_env):
 async def test_update_container_flags_an_empty_result_set(mock_env):
     """An empty results array must not read as a successful update."""
     with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(
                 200,

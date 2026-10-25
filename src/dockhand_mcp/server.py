@@ -19,7 +19,8 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Any
 
 import structlog
 from fastmcp import FastMCP
@@ -31,6 +32,7 @@ from .client import (
     DockhandError,
     close_client,
     get_client,
+    json_body,
 )
 from .observability import (
     ToolTracingMiddleware,
@@ -41,6 +43,7 @@ from .observability import (
 )
 from .pin_report import overlay as _pin_overlay
 from .pin_report import read_report as _read_pin_report
+from .redaction import mask_env_dump, redact_compose, redact_container_env
 
 configure_logging()
 log = structlog.get_logger(__name__)
@@ -109,7 +112,13 @@ def _tool_error(tool: str, err: Exception) -> dict:
     # agent. Loopback-only service, trusted forge-agent callers, no secrets or
     # stack traces in the message. Accepted 2026-07-25 (audit
     # dockhand-mcp-env-param-fix; same class as memsearch-mcp / nextcloud-mcp).
-    log.error("tool_error", tool=tool, error=str(err))
+    log.error(
+        "tool_error",
+        tool=tool,
+        error=str(err),
+        error_type=type(err).__name__,
+        status_code=getattr(err, "status_code", None),
+    )
     return {"error": str(err)}
 
 
@@ -234,7 +243,7 @@ async def get_health() -> dict:
     try:
         client = get_client()
         resp, duration = await _timed_get(client, "/api/health")
-        data = resp.json()
+        data = json_body(resp)
         log.info("get_health", status=data.get("status"), duration_s=round(duration, 3))
         await emit_metric(
             "dockhand_tool",
@@ -247,7 +256,7 @@ async def get_health() -> dict:
 
 
 @mcp.tool
-async def list_containers(environment_id: Optional[str] = None) -> dict:
+async def list_containers(environment_id: str | int | None = None) -> dict:
     """List all Docker containers managed by Dockhand.
 
     Returns container name, image, status, and environment for each container.
@@ -259,7 +268,7 @@ async def list_containers(environment_id: Optional[str] = None) -> dict:
         client = get_client()
         env = client.resolve_env(environment_id)
         resp, duration = await _timed_get(client, "/api/containers", params={"env": env})
-        data = resp.json()
+        data = json_body(resp)
         containers = data if isinstance(data, list) else data.get("containers", [])
         total = len(containers)
         running = sum(
@@ -276,46 +285,135 @@ async def list_containers(environment_id: Optional[str] = None) -> dict:
         return _tool_error("list_containers", e)
 
 
-@mcp.tool
-async def list_stacks(environment_id: Optional[str] = None) -> dict:
-    """List all Docker Compose stacks managed by Dockhand.
+def _compact_stack(stack: dict) -> dict:
+    """One list_stacks row without containerDetails' labels, ports and networks.
 
-    Returns stack name, status, and container count for each stack.
+    Dockhand 1.0.55 rows carry ``containerDetails`` with every container's full
+    label set: 34 stacks came to 179,542 characters (dockhand-2026-10 p1), past
+    the tool-result limit. This keeps what a caller decides on.
+    """
+    details = stack.get("containerDetails")
+    details = details if isinstance(details, list) else []
+    containers = [
+        {
+            "name": c.get("name"),
+            "service": c.get("service"),
+            "state": c.get("state"),
+            "status": c.get("status"),
+        }
+        for c in details
+        if isinstance(c, dict)
+    ]
+    ids = stack.get("containers")
+    services = {c["service"] for c in containers if c.get("service")}
+    row = {
+        "name": stack.get("name"),
+        "status": stack.get("status"),
+        "health": stack.get("health"),
+        "sourceType": stack.get("sourceType"),
+        "service_count": len(services),
+        "container_count": len(ids) if isinstance(ids, list) else len(containers),
+        "containers": containers,
+    }
+    for key in ("updateCount", "pinnedDigestCount", "newerVersionCount", "coolingDownCount"):
+        if stack.get(key):
+            row[key] = stack[key]
+    return row
+
+
+@mcp.tool
+async def list_stacks(
+    environment_id: str | int | None = None,
+    detail: bool = False,
+    names: list[str] | None = None,
+) -> dict:
+    """List Docker Compose stacks managed by Dockhand.
+
+    Compact by default: per stack, its status, health, source, service and
+    container counts, any non-zero update counters, and each container's name,
+    service, state and status. The full Dockhand row (``containerDetails`` with
+    every label, port and network) is large — about 180k characters for 34
+    stacks — so ask for it only where you need it.
 
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+        detail: Return full Dockhand rows for every stack. Large.
+        names: Return full rows for just these stacks. Names that do not exist
+            are listed under ``not_found``.
     """
     try:
         client = get_client()
         env = client.resolve_env(environment_id)
         resp, duration = await _timed_get(client, "/api/stacks", params={"env": env})
-        data = resp.json()
+        data = json_body(resp)
         stacks = data if isinstance(data, list) else data.get("stacks", [])
-        log.info("list_stacks", total=len(stacks), duration_s=round(duration, 3))
+        stacks = [s for s in stacks if isinstance(s, dict)]
+        result: dict[str, Any] = {"total": len(stacks)}
+        if names:
+            wanted = set(names)
+            result["stacks"] = [s for s in stacks if s.get("name") in wanted]
+            result["not_found"] = sorted(wanted - {s.get("name") for s in result["stacks"]})
+        elif detail:
+            result["stacks"] = stacks
+        else:
+            result["stacks"] = [_compact_stack(s) for s in stacks]
+        log.info(
+            "list_stacks",
+            total=len(stacks),
+            detail=bool(detail or names),
+            duration_s=round(duration, 3),
+        )
         await emit_metric(
             "dockhand_tool",
             {"tool": "list_stacks"},
             {"duration_s": duration, "total": len(stacks)},
         )
-        return {"stacks": stacks, "total": len(stacks)}
+        return result
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("list_stacks", e)
 
 
 @mcp.tool
-async def get_activity(limit: int = 20, offset: int = 0) -> dict:
+async def get_activity(
+    limit: int = 20,
+    offset: int = 0,
+    container_name: str | None = None,
+    actions: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    environment_id: str | int | None = None,
+) -> dict:
     """Get recent Dockhand activity log — container start/stop/update events.
 
     Args:
-        limit: Number of events to return (default 20, max 100).
+        limit: Number of events to return (default 20, clamped to 1-100).
         offset: Pagination offset (default 0).
+        container_name: Only events for this container.
+        actions: Comma-separated event actions, e.g. 'die,restart'.
+        from_date: ISO 8601 lower bound.
+        to_date: ISO 8601 upper bound.
+        environment_id: Only this environment. Unset means every environment,
+            unless this instance is pinned with DOCKHAND_ALLOWED_ENVS.
     """
     try:
         client = get_client()
-        resp, duration = await _timed_get(
-            client, f"/api/activity?limit={min(limit, 100)}&offset={offset}"
-        )
-        data = resp.json()
+        params: dict[str, Any] = {
+            "limit": max(1, min(int(limit), 100)),
+            "offset": max(0, int(offset)),
+        }
+        env = client.env_filter(environment_id)
+        if env is not None:
+            params["environmentId"] = env
+        for name, value in (
+            ("containerName", container_name),
+            ("actions", actions),
+            ("fromDate", from_date),
+            ("toDate", to_date),
+        ):
+            if value:
+                params[name] = value
+        resp, duration = await _timed_get(client, "/api/activity", params=params)
+        data = json_body(resp)
         events = data.get("events", data) if isinstance(data, dict) else data
         total = data.get("total", len(events)) if isinstance(data, dict) else len(events)
         log.info("get_activity", returned=len(events), total=total, duration_s=round(duration, 3))
@@ -324,156 +422,9 @@ async def get_activity(limit: int = 20, offset: int = 0) -> dict:
             {"tool": "get_activity"},
             {"duration_s": duration, "returned": len(events), "total": total},
         )
-        return data
+        return data if isinstance(data, dict) else {"events": data}
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("get_activity", e)
-
-
-# ---------------------------------------------------------------------------
-# Read tools — environment redaction
-# ---------------------------------------------------------------------------
-
-# SECURITY: this is the ONLY thing standing between inspect_container's caller and
-# every secret on the host. It was designed as a second layer behind Dockhand's own
-# masking; measurement on 2026-09-07 showed that masking does not fire here at all.
-#
-# GET /api/containers/{id} is documented as masking a compose project's secret
-# variables to KEY=***, and GET /api/containers/{id}/inspect is documented as not
-# masking anything. Against forge's live Dockhand v1.0.46, both returned 322 of 322
-# secret-shaped env vars UNMASKED across 123 containers — the string "***" appeared
-# nowhere in either response. Dockhand masks variables it knows as a project's
-# secrets, and forge's stacks supply env from env_file paths Dockhand's container
-# cannot read (vikunja#542/#410). So the masking is real code that never fires here.
-#
-# Consequence: do not weaken this pass on the grounds that Dockhand also masks.
-# It does not.
-_SECRET_KEY = re.compile(
-    # "PASS" is deliberately a bare substring, not \bPASS\b: the live miss that
-    # prompted this was DFLY_requirepass, where "pass" has no word boundary.
-    # It subsumes PASSWORD/PASSWD/PASSPHRASE. Likewise PWD for POSTGRES_PWD.
-    # Over-matching here is cheap because a provably-benign value escapes below,
-    # so AUTH does not redact the ~30 GF_AUTH_*=true config flags on this host.
-    r"PASS|PWD|TOKEN|SECRET|CREDENTIAL|CREDS|APIKEY|API_KEY|ACCESS_KEY"
-    r"|PRIVATE_KEY|_KEY|KEY_|KEYS|SALT|BEARER|DSN|AUTH|SIGNATURE|SIGNING",
-    re.IGNORECASE,
-)
-
-# Values that cannot be a credential whatever their key is called. This is what
-# makes the deliberately greedy key pattern above survivable.
-_BENIGN_VALUE = re.compile(
-    r"^(?:true|false|yes|no|on|off|none|null|nil|debug|info|warn|warning|error"
-    r"|fatal|trace|silent|verbose|production|development|staging|test|always"
-    r"|never|auto|enabled|disabled)$",
-    re.IGNORECASE,
-)
-_NUMERIC_VALUE = re.compile(r"^-?\d+(?:\.\d+)?$")
-
-# A single opaque token of any real length — the shape every secret on this host
-# actually has. This is the half that catches a credential under a key nobody
-# thought to pattern-match, which is the failure mode a key allowlist cannot fix:
-# it can only ever be current up to the last audit that tried to defeat it.
-_OPAQUE_CREDENTIAL = re.compile(r"^[A-Za-z0-9+/=_.~-]{20,}$")
-
-# Credentials embedded in a URL value (postgres://user:pass@host) are invisible to
-# a key-name test — the key is usually a bland *_URL. Many live here.
-_URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@")
-
-# A credential in a URL query string has no userinfo to strip and usually sits
-# under a bland key like FEED_URL, so neither the key test nor the userinfo test
-# sees it.
-_URL_QUERY_SECRET = re.compile(
-    r"(?P<sep>[?&])"
-    r"(?P<name>[^=&\s]*(?:PASS|PWD|TOKEN|SECRET|KEY|AUTH|SIG|CREDENTIAL)[^=&\s]*)"
-    r"=(?P<value>[^&\s]*)",
-    re.IGNORECASE,
-)
-
-_REDACTED = "***REDACTED***"
-
-
-def _is_benign_value(value: str) -> bool:
-    """True when a value cannot be a credential regardless of its key's name.
-
-    Only consulted for keys that do NOT look secret-shaped — see _redact_value,
-    where a secret-shaped key gets a much narrower escape.
-    """
-    if _is_structurally_harmless(value):
-        return True
-    # An "@" means possible userinfo; whitespace means prose, not a token.
-    if "@" in value or re.search(r"\s", value):
-        return False
-    if value.startswith("/"):
-        return True  # absolute filesystem path
-    if "://" in value:
-        # A URL with no userinfo — benign unless it carries a secret-shaped
-        # query parameter, e.g. ...?access_token=...
-        return not _SECRET_KEY.search(value.partition("?")[2])
-    return False
-
-
-def _is_structurally_harmless(value: str) -> bool:
-    """A value that cannot encode a credential at all: empty, a flag, a number."""
-    return bool(value == "" or _BENIGN_VALUE.match(value) or _NUMERIC_VALUE.match(value))
-
-
-def _redact_value(key: str, value: str) -> str:
-    """Redact one key/value pair, defaulting to deny for anything unrecognised."""
-    if _SECRET_KEY.search(key):
-        # A secret-shaped key gets only the narrow escape. Deliberately NOT the
-        # path/URL escape: a webhook URL stored under WEBHOOK_SECRET *is* the
-        # secret, and letting the URL branch run first leaked exactly that.
-        return value if _is_structurally_harmless(value) else _REDACTED
-
-    if _is_benign_value(value):
-        return value
-
-    # The half a key allowlist cannot provide: an opaque token under a key
-    # nobody thought to pattern-match.
-    if _OPAQUE_CREDENTIAL.match(value):
-        return _REDACTED
-
-    # Otherwise the value is not itself a secret, but may still carry one.
-    value = _URL_CREDENTIALS.sub(rf"\g<scheme>{_REDACTED}@", value)
-    return _URL_QUERY_SECRET.sub(rf"\g<sep>\g<name>={_REDACTED}", value)
-
-
-def _redact_env_entry(entry: str) -> str:
-    """Redact one ``KEY=value`` string from a Docker ``Config.Env`` array."""
-    if not isinstance(entry, str):
-        return entry
-    key, sep, value = entry.partition("=")
-    if not sep:
-        return entry
-    return f"{key}{sep}{_redact_value(key, value)}"
-
-
-def _redact_container_env(payload: Any) -> Any:
-    """Return ``payload`` with secret-shaped values in Config.Env/Labels redacted.
-
-    Scope, stated plainly because a redaction pass that overstates its reach is
-    worse than none: this covers ``Config.Env`` and ``Config.Labels``. It does
-    **not** inspect ``Config.Cmd``, ``Entrypoint`` or ``Args``, so a container
-    started with a credential on its command line is still returned in the clear.
-    inspect_container's docstring says so, and its output is to be treated as
-    sensitive regardless.
-    """
-    if not isinstance(payload, dict):
-        return payload
-    out = dict(payload)
-    config = out.get("Config")
-    if isinstance(config, dict):
-        config = dict(config)
-        env = config.get("Env")
-        if isinstance(env, list):
-            config["Env"] = [_redact_env_entry(e) for e in env]
-        labels = config.get("Labels")
-        if isinstance(labels, dict):
-            config["Labels"] = {
-                k: (_redact_value(str(k), v) if isinstance(v, str) else v)
-                for k, v in labels.items()
-            }
-        out["Config"] = config
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +433,7 @@ def _redact_container_env(payload: Any) -> Any:
 
 
 @mcp.tool
-async def inspect_container(container_id: str, environment_id: Optional[str] = None) -> dict:
+async def inspect_container(container_id: str, environment_id: str | int | None = None) -> dict:
     """Inspect a container's full Docker configuration — image, env, mounts, network.
 
     **Treat the output as sensitive.** This server redacts before returning, and
@@ -524,7 +475,7 @@ async def inspect_container(container_id: str, environment_id: Optional[str] = N
         resp, duration = await _timed_get(
             client, f"/api/containers/{container_id}", params={"env": env}
         )
-        data = _redact_container_env(resp.json())
+        data = redact_container_env(json_body(resp))
         log.info("inspect_container", container_id=container_id[:12], duration_s=round(duration, 3))
         await emit_metric(
             "dockhand_tool",
@@ -540,17 +491,23 @@ async def inspect_container(container_id: str, environment_id: Optional[str] = N
 async def get_container_logs(
     container_id: str,
     tail: int = 100,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
-    environment_id: Optional[str] = None,
+    since: str | None = None,
+    until: str | None = None,
+    environment_id: str | int | None = None,
 ) -> dict:
-    """Get a container's combined stdout/stderr logs.
+    """Get a container's combined stdout/stderr logs, with env-file dumps masked.
 
     ``tail`` is bounded to 100 lines by default and capped at 5000 — an unbounded
     default would pull a whole log history into the caller's context.
 
-    Logs may contain secrets that no redaction here can find, since a secret in a
-    log line has no key to match on. This is the same exposure as ``docker logs``.
+    Dockhand prints a stack's whole ``.env`` to its own log on every stack
+    action. Those blocks come back as ``[env file content masked by
+    dockhand-mcp]``, including multi-line values, and a block cut off by
+    ``tail`` is masked to the end. ``KEY=value`` lines elsewhere get the same
+    value-shape redaction as inspect_container. ``masked_lines`` counts both.
+
+    A secret in free text, with no ``KEY=`` in front of it, has nothing to match
+    on and is returned as-is. Treat the output as sensitive.
 
     Args:
         container_id: Container ID from list_containers.
@@ -572,13 +529,24 @@ async def get_container_logs(
         resp, duration = await _timed_get(
             client, f"/api/containers/{container_id}/logs", params=params
         )
-        data = resp.json() if resp.content else {}
+        data = json_body(resp) if resp.content else {}
         if not isinstance(data, dict):
             data = {"logs": data}
+        # Masked for every container, not only "dockhand": the dump also lands in
+        # any log that relays Dockhand's (a log shipper's own output, a renamed
+        # container), and the name is the caller's to choose. Matching the name
+        # here would be a guard keyed on intent, not on what the text contains.
+        masked_total = 0
+        for key in ("logs", "stdout", "stderr"):
+            if isinstance(data.get(key), str):
+                data[key], masked = mask_env_dump(data[key])
+                masked_total += masked
+        data["masked_lines"] = masked_total
         log.info(
             "get_container_logs",
             container_id=container_id[:12],
             tail=params["tail"],
+            masked_lines=masked_total,
             duration_s=round(duration, 3),
         )
         await emit_metric(
@@ -592,7 +560,7 @@ async def get_container_logs(
 
 
 @mcp.tool
-async def get_container_stats(container_id: str, environment_id: Optional[str] = None) -> dict:
+async def get_container_stats(container_id: str, environment_id: str | int | None = None) -> dict:
     """Get a one-shot CPU, memory, network and block-IO snapshot for a container.
 
     This is a single sample, not a stream — call it again for a second reading.
@@ -609,7 +577,7 @@ async def get_container_stats(container_id: str, environment_id: Optional[str] =
         resp, duration = await _timed_get(
             client, f"/api/containers/{container_id}/stats", params={"env": env}
         )
-        data = resp.json()
+        data = json_body(resp)
         log.info(
             "get_container_stats", container_id=container_id[:12], duration_s=round(duration, 3)
         )
@@ -624,12 +592,17 @@ async def get_container_stats(container_id: str, environment_id: Optional[str] =
 
 
 @mcp.tool
-async def get_stack_compose(stack_name: str, environment_id: Optional[str] = None) -> dict:
+async def get_stack_compose(stack_name: str, environment_id: str | int | None = None) -> dict:
     """Get a stack's docker-compose file content and its resolved compose/env paths.
 
     Returns the compose definition only. Stack environment *values* are not
     exposed by this server at all — Dockhand's stack env routes have no masking
     and are deliberately not wrapped.
+
+    Values written inline in the compose file (``- KEY=value``, ``KEY: value``)
+    get the same value-shape redaction as inspect_container: a credential-shaped
+    key or an opaque token is replaced, and ``redacted_values`` counts them.
+    A bare ``${NAME}`` reference is left readable.
 
     Args:
         stack_name: Stack name from list_stacks.
@@ -643,19 +616,27 @@ async def get_stack_compose(stack_name: str, environment_id: Optional[str] = Non
         resp, duration = await _timed_get(
             client, f"/api/stacks/{stack_name}/compose", params={"env": env}
         )
-        data = resp.json()
+        data = json_body(resp)
+        if not isinstance(data, dict):
+            data = {"compose": data}
+        redacted_total = 0
+        for key in ("content", "compose"):
+            if isinstance(data.get(key), str):
+                data[key], redacted = redact_compose(data[key])
+                redacted_total += redacted
+        data["redacted_values"] = redacted_total
         log.info("get_stack_compose", stack=stack_name, duration_s=round(duration, 3))
         await emit_metric(
             "dockhand_tool",
             {"tool": "get_stack_compose"},
             {"duration_s": duration, "stack": stack_name},
         )
-        return data if isinstance(data, dict) else {"compose": data}
+        return data
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("get_stack_compose", e)
 
 
-async def _listing_tool(tool: str, path: str, key: str, environment_id: Optional[str]) -> dict:
+async def _listing_tool(tool: str, path: str, key: str, environment_id: str | int | None) -> dict:
     """Shared body for the flat inventory listings (images, volumes, networks).
 
     All three answer ``[]`` rather than an error when ``env`` is absent, which is
@@ -666,7 +647,7 @@ async def _listing_tool(tool: str, path: str, key: str, environment_id: Optional
         client = get_client()
         env = client.resolve_env(environment_id)
         resp, duration = await _timed_get(client, path, params={"env": env})
-        data = resp.json()
+        data = json_body(resp)
         items = data if isinstance(data, list) else data.get(key, [])
         log.info(tool, total=len(items), duration_s=round(duration, 3))
         await emit_metric(
@@ -678,7 +659,7 @@ async def _listing_tool(tool: str, path: str, key: str, environment_id: Optional
 
 
 @mcp.tool
-async def list_images(environment_id: Optional[str] = None) -> dict:
+async def list_images(environment_id: str | int | None = None) -> dict:
     """List Docker images — id, tags, size and creation time.
 
     Args:
@@ -688,7 +669,7 @@ async def list_images(environment_id: Optional[str] = None) -> dict:
 
 
 @mcp.tool
-async def list_volumes(environment_id: Optional[str] = None) -> dict:
+async def list_volumes(environment_id: str | int | None = None) -> dict:
     """List Docker volumes — name, driver, mountpoint and labels.
 
     Args:
@@ -698,7 +679,7 @@ async def list_volumes(environment_id: Optional[str] = None) -> dict:
 
 
 @mcp.tool
-async def list_networks(environment_id: Optional[str] = None) -> dict:
+async def list_networks(environment_id: str | int | None = None) -> dict:
     """List Docker networks — name, driver, scope and attached containers.
 
     Args:
@@ -707,8 +688,40 @@ async def list_networks(environment_id: Optional[str] = None) -> dict:
     return await _listing_tool("list_networks", "/api/networks", "networks", environment_id)
 
 
+_STALE_AFTER_HOURS = 7 * 24
+
+
+def _mark_staleness(rows: Any, now: datetime | None = None) -> int:
+    """Add ``checked_age_hours`` and ``stale`` to each row; return the stale count.
+
+    Measured 2026-10-25: rows served from a 2026-10-01 check, for stacks retired
+    since. A missing or unparseable ``checkedAt`` is stale, not fresh.
+    """
+    if not isinstance(rows, list):
+        return 0
+    now = now or datetime.now(timezone.utc)
+    stale = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        age = None
+        checked = row.get("checkedAt")
+        if isinstance(checked, str):
+            try:
+                ts = datetime.fromisoformat(checked.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age = round((now - ts).total_seconds() / 3600, 1)
+            except ValueError:
+                age = None
+        row["checked_age_hours"] = age
+        row["stale"] = age is None or age > _STALE_AFTER_HOURS
+        stale += row["stale"]
+    return stale
+
+
 @mcp.tool
-async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
+async def get_pending_updates(environment_id: str | int | None = None) -> dict:
     """List containers with an image update available.
 
     Reports what a previous check_updates run found; it does not run a new check.
@@ -719,6 +732,12 @@ async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
     check_updates and read each pinned row's ``pin_assessment``. Any pinned row
     that does appear gets the same ``pin_assessment`` overlay, and the response
     carries the same ``digest_pins`` summary (see check_updates).
+
+    **Rows can be old.** Dockhand keeps a row until the next check replaces it,
+    including rows for containers that no longer exist. Each row gets
+    ``checked_age_hours`` and ``stale`` (older than 7 days, or no ``checkedAt``),
+    and the top-level ``stale`` counts them. Re-run check_updates before acting
+    on a stale row.
 
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
@@ -731,13 +750,14 @@ async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
         resp, duration = await _timed_get(
             client, "/api/containers/pending-updates", params={"env": env}
         )
-        data = resp.json()
+        data = json_body(resp)
         # The key is "pendingUpdates", not "updates". Reading the wrong one
         # returned total=0 against a host that had 27 — a zero indistinguishable
         # from a real "nothing pending", which is the whole failure mode this
         # tool exists to avoid. Verified against the live response, not guessed.
         updates = data if isinstance(data, list) else data.get("pendingUpdates", [])
         available = sum(1 for u in updates if isinstance(u, dict) and u.get("hasImageUpdate"))
+        stale = _mark_staleness(updates)
         digest_pins = _pin_overlay(updates, "currentImage", "containerName", _read_pin_report())
         log.info(
             "get_pending_updates",
@@ -756,6 +776,7 @@ async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
             "pendingUpdates": updates,
             "total": len(updates),
             "withUpdateAvailable": available,
+            "stale": stale,
             "digest_pins": digest_pins,
         }
     except (DockhandError, DockhandConfigError) as e:
@@ -763,7 +784,7 @@ async def get_pending_updates(environment_id: Optional[str] = None) -> dict:
 
 
 @mcp.tool
-async def get_host_info(environment_id: Optional[str] = None) -> dict:
+async def get_host_info(environment_id: str | int | None = None) -> dict:
     """Get Docker host information — hostname, CPU, memory, uptime, container counts.
 
     Args:
@@ -773,7 +794,7 @@ async def get_host_info(environment_id: Optional[str] = None) -> dict:
         client = get_client()
         env = client.resolve_env(environment_id)
         resp, duration = await _timed_get(client, "/api/host", params={"env": env})
-        data = resp.json()
+        data = json_body(resp)
         log.info("get_host_info", duration_s=round(duration, 3))
         await emit_metric("dockhand_tool", {"tool": "get_host_info"}, {"duration_s": duration})
         return data if isinstance(data, dict) else {"host": data}
@@ -788,7 +809,7 @@ async def get_host_info(environment_id: Optional[str] = None) -> dict:
 
 @mcp.tool
 async def container_action(
-    container_id: str, action: str, environment_id: Optional[str] = None
+    container_id: str, action: str, environment_id: str | int | None = None
 ) -> dict:
     """Perform a lifecycle action on a Docker container.
 
@@ -819,7 +840,7 @@ async def container_action(
             )
         duration = time.perf_counter() - t0
 
-        data = resp.json() if resp.content else {"status": "ok"}
+        data = json_body(resp) if resp.content else {"status": "ok"}
         log.info(
             "container_action",
             container_id=container_id[:12],
@@ -836,49 +857,72 @@ async def container_action(
         return _tool_error("container_action", e)
 
 
+def _env_log_refusal(stack_name: str, action: str) -> dict:
+    return {
+        "error": (
+            f"stack_action {action!r} on {stack_name!r} needs acknowledge_env_log=true. "
+            "Dockhand prints the stack's whole .env file to its own log for this action "
+            "(measured on Dockhand 1.0.55 for start, stop, restart and deploy), so every "
+            "secret in it lands in `docker logs dockhand`. The path that does not leak is "
+            "`docker compose` for this stack through system-ops. To go through Dockhand "
+            "anyway, call again with acknowledge_env_log=true."
+        ),
+        "acknowledge_env_log_required": True,
+    }
+
+
 @mcp.tool
 async def stack_action(
     stack_name: str,
     action: str,
-    environment_id: Optional[str] = None,
-    pull: Optional[bool] = None,
-    build: Optional[bool] = None,
-    force_recreate: Optional[bool] = None,
+    environment_id: str | int | None = None,
+    pull: bool | None = None,
+    build: bool | None = None,
+    force_recreate: bool | None = None,
+    acknowledge_env_log: bool = False,
 ) -> dict:
     """Perform a lifecycle action on a Docker Compose stack.
 
     Actions: start, stop, restart, deploy.
     Use list_stacks to see available stack names.
 
-    **deploy is whole-stack.** Dockhand's REST API has no per-service parameter —
-    its compose runner threads a service name internally, but the route never
-    accepts one. When you need single-service scope, run
-    ``docker compose up -d <service>`` via system-ops instead.
+    **Every action needs ``acknowledge_env_log=true``.** Dockhand prints the
+    stack's ``.env`` to its own log on all four actions, so the secrets in it
+    land in ``docker logs dockhand``. Without the flag the call is refused before
+    any request. For a stack with secrets, prefer ``docker compose`` through
+    system-ops.
 
-    ``pull`` defaults to True, which makes Dockhand run ``compose up -d --pull
-    always``. That re-resolves every image and can recreate services you did not
-    intend to touch (vikunja#671). ``pull=False`` gives a plain
-    ``docker compose up -d``, which recreates only services whose resolved
-    config actually changed.
+    **deploy is whole-stack.** The route takes no service name. For one service,
+    run ``docker compose up -d <service>`` via system-ops.
 
-    Job behaviour differs by action, per the v1.0.46 spec: ``start`` and ``stop``
-    return a jobId and are polled to completion here, returning
+    ``pull`` defaults to False: a plain ``compose up -d``, which recreates only
+    services whose config changed and still pulls a pinned digest that is not
+    local. ``pull=True`` re-resolves every image and can recreate services you
+    did not mean to touch (vikunja#671).
+
+    ``start`` and ``stop`` return a jobId, polled here to completion:
     {jobId, success, output} or {jobId, success: false, error}. ``deploy`` and
-    ``restart`` return their result directly and are not polled.
+    ``restart`` answer directly with {success, output|error}, as measured on
+    1.0.55.
 
     Args:
         stack_name: Stack name from list_stacks.
         action: One of: start, stop, restart, deploy.
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
-        pull: deploy only. Re-pull images first. Defaults to True.
+        pull: deploy only. Re-pull every image first. Defaults to False.
         build: deploy only. Build images before starting. Defaults to False.
         force_recreate: deploy only. Recreate containers even when config is
             unchanged. Defaults to False.
+        acknowledge_env_log: Required, for every action. Confirms you accept
+            that Dockhand writes this stack's .env to its log.
     """
     if action not in _STACK_ACTIONS:
         return {"error": f"action must be one of: {', '.join(sorted(_STACK_ACTIONS))}"}
     if not _SAFE_ID.match(stack_name):
         return {"error": f"Invalid stack_name: {stack_name!r}"}
+    # `is not True`, not `not ...`: only an explicit boolean true acknowledges.
+    if acknowledge_env_log is not True:
+        return _env_log_refusal(stack_name, action)
 
     # These three are rejected rather than ignored on the bodyless actions.
     # Accepting pull=False on a restart and dropping it would report a flag as
@@ -907,11 +951,10 @@ async def stack_action(
         client = get_client()
         env = client.resolve_env(environment_id)
         # deploy's handler calls request.json() and 500s on an empty body;
-        # start/stop/restart take no body. Unset flags resolve to the historical
-        # hardcoded values so existing callers see no behaviour change.
+        # start/stop/restart take no body.
         body = (
             {
-                "pull": True if pull is None else pull,
+                "pull": False if pull is None else pull,
                 "build": False if build is None else build,
                 "forceRecreate": False if force_recreate is None else force_recreate,
             }
@@ -926,14 +969,14 @@ async def stack_action(
         resp, post_duration = await _timed_post(
             client, f"/api/stacks/{stack_name}/{action}", params={"env": env}, json=body
         )
-        data = resp.json() if resp.content else {"status": "ok"}
+        data = json_body(resp) if resp.content else {"status": "ok"}
         data = await _finalize_job(client, data)
         duration = time.perf_counter() - t0
         log.info(
             "stack_action",
             stack=stack_name,
             action=action,
-            success=data.get("success"),
+            success=data.get("success") if isinstance(data, dict) else None,
             duration_s=round(duration, 3),
             post_duration_s=round(post_duration, 3),
         )
@@ -946,14 +989,31 @@ async def stack_action(
                 "stack": stack_name,
             },
         )
-        return data
+        return data if isinstance(data, dict) else {"result": data}
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("stack_action", e)
 
 
+def _needs_attention(row: Any) -> bool:
+    """A check_updates row worth showing by default: an update, an error, or a
+    digest pin whose assessment is anything but ``current``."""
+    if not isinstance(row, dict):
+        return True
+    if row.get("hasUpdate") or row.get("error"):
+        return True
+    pin = row.get("pin_assessment")
+    return isinstance(pin, dict) and pin.get("status") != "current"
+
+
 @mcp.tool
-async def check_updates(environment_id: Optional[str] = None) -> dict:
+async def check_updates(environment_id: str | int | None = None, include_all: bool = False) -> dict:
     """Check every container for a newer image, and wait for the answer.
+
+    **Filtered by default.** ``results`` holds only rows that need attention:
+    ``hasUpdate``, an ``error``, or a digest pin whose ``pin_assessment`` is
+    not ``current`` (so ``not_assessed`` shows). ``attention_summary`` counts the whole
+    set. Pass ``include_all=true`` for every row; the full set for a host with
+    over 100 containers came to about 55k characters.
 
     Not queued, despite the name: Dockhand documents this route as a
     text/event-stream job feed "or, with Accept: application/json, the final
@@ -991,6 +1051,7 @@ async def check_updates(environment_id: Optional[str] = None) -> dict:
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
             Without it Dockhand fails with 'No environment specified'.
+        include_all: Return every row, not only the ones needing attention.
     """
     try:
         client = get_client()
@@ -998,13 +1059,27 @@ async def check_updates(environment_id: Optional[str] = None) -> dict:
         resp, duration = await _timed_post(
             client, "/api/containers/check-updates", params={"env": env}
         )
-        data = resp.json()
+        data = json_body(resp)
         digest_pins = None
         if isinstance(data, dict):
             digest_pins = _pin_overlay(
                 data.get("results"), "imageName", "containerName", _read_pin_report()
             )
             data["digest_pins"] = digest_pins
+            rows = data.get("results")
+            if isinstance(rows, list):
+                attention = [r for r in rows if _needs_attention(r)]
+                data["attention_summary"] = {
+                    "checked": len(rows),
+                    "attention": len(attention),
+                    "has_update": sum(
+                        1 for r in rows if isinstance(r, dict) and r.get("hasUpdate")
+                    ),
+                    "errors": sum(1 for r in rows if isinstance(r, dict) and r.get("error")),
+                }
+                data["filtered"] = not include_all
+                if not include_all:
+                    data["results"] = attention
         # Not job_id: this route returns {total, updatesFound, results} directly
         # and every real call logged an empty job id for the life of the service.
         log.info(
@@ -1026,7 +1101,7 @@ async def check_updates(environment_id: Optional[str] = None) -> dict:
 
 
 @mcp.tool
-async def update_container(container_id: str, environment_id: Optional[str] = None) -> dict:
+async def update_container(container_id: str, environment_id: str | int | None = None) -> dict:
     """Re-pull a container's image and recreate the container in place.
 
     Recreates the container through Dockhand's batch-update endpoint, which
@@ -1047,8 +1122,12 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
     ``{success: true, skipped: true, reason: ...}`` when the container carries the
     ``dockhand.update=false`` label and Dockhand declined to touch it.
 
+    Accepts a container name, a short id or a full id. It is resolved to the
+    full id with a read first; a container that does not resolve is an error and
+    nothing is updated.
+
     Args:
-        container_id: Container ID from list_containers.
+        container_id: Container name or ID from list_containers.
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
     """
     if not _SAFE_ID.match(container_id):
@@ -1057,6 +1136,10 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
     try:
         client = get_client()
         env = client.resolve_env(environment_id)
+        # batch-update matches full ids only. A name used to fail *after* HITL,
+        # with the rejected attempt still counted against the hourly limit.
+        requested = container_id
+        container_id = await client.resolve_container_id(requested, env)
         # Do NOT route this at POST /api/containers/{id}/update. That handler
         # destructures the body as {startAfterUpdate, repullImage, ...options} and
         # then calls pullImage(options.image), so a body carrying only the two
@@ -1080,12 +1163,13 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
             params={"env": env},
             json={"containerIds": [container_id]},
         )
-        data = resp.json() if resp.content else {"status": "ok"}
+        data = json_body(resp) if resp.content else {"status": "ok"}
         data = await _finalize_job(client, data)
         data = _unwrap_batch_update(data, container_id)
         duration = time.perf_counter() - t0
         log.info(
             "update_container",
+            requested=requested[:64],
             container_id=container_id[:12],
             env_id=env,
             success=data.get("success"),
@@ -1110,7 +1194,7 @@ async def update_container(container_id: str, environment_id: Optional[str] = No
 
 
 @mcp.tool
-async def scan_image(image_name: str) -> dict:
+async def scan_image(image_name: str, environment_id: str | int | None = None) -> dict:
     """Run a Trivy/Grype CVE vulnerability scan on a Docker image.
 
     Scans the image for known CVEs. Returns vulnerability counts by severity
@@ -1120,15 +1204,19 @@ async def scan_image(image_name: str) -> dict:
 
     Args:
         image_name: Full image name with tag, e.g. 'nginx:latest', 'postgres:16-alpine'.
+        environment_id: Environment whose Docker host runs the scan. Unset means
+            Dockhand's default, unless this instance is pinned.
     """
     try:
         client = get_client()
+        env = client.env_filter(environment_id)
         resp, duration = await _timed_post(
             client,
             "/api/images/scan",
+            params={"env": env} if env is not None else None,
             json={"imageName": image_name},
         )
-        data = resp.json()
+        data = json_body(resp)
         log.info(
             "scan_image",
             image=image_name,

@@ -64,6 +64,11 @@ JOB_DONE_FAILURE = {
 # requested id back would be a shape Dockhand never actually produces.
 REQUESTED_ID = "abc123def456"
 RECREATED_ID = "f00dcafe9999"
+# update_container resolves what it is given (a name, a short id) to the full id
+# with GET /api/containers/{id} before it POSTs, because batch-update matches
+# full ids only (dockhand-2026-10 p1). Tests mock that read with this payload.
+FULL_ID = REQUESTED_ID + "0" * 52
+INSPECT_FOR_RESOLVE = {"Id": FULL_ID, "Name": "/nginx", "Config": {"Env": []}}
 
 BATCH_UPDATE_SUCCESS = {
     "success": True,

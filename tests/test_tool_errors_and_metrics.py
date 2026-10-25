@@ -26,6 +26,7 @@ from dockhand_mcp import server
 from .conftest import (
     BATCH_UPDATE_SUCCESS,
     ENDPOINT,
+    INSPECT_FOR_RESOLVE,
     JOB_DONE_SUCCESS,
     JOB_QUEUED,
     STACKS_RESPONSE,
@@ -40,7 +41,7 @@ ALL_TOOLS = [
     ("list_stacks", {}),
     ("get_activity", {}),
     ("container_action", {"container_id": "abc123", "action": "start"}),
-    ("stack_action", {"stack_name": "searxng", "action": "restart"}),
+    ("stack_action", {"stack_name": "searxng", "action": "restart", "acknowledge_env_log": True}),
     ("check_updates", {}),
     ("update_container", {"container_id": "abc123"}),
     ("scan_image", {"image_name": "nginx:latest"}),
@@ -181,15 +182,16 @@ def slow_job(monkeypatch):
 @pytest.mark.asyncio
 async def test_stack_action_duration_includes_the_job_poll(mock_env, slow_job, collect_metrics):
     with respx.mock(base_url=ENDPOINT) as mock:
-        mock.post("/api/stacks/searxng/restart").mock(
+        # start, not restart: start is a route that returns a jobId (1.0.55 spec).
+        mock.post("/api/stacks/searxng/start").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
 
-        await server.stack_action(stack_name="searxng", action="restart")
+        await server.stack_action(stack_name="searxng", action="start", acknowledge_env_log=True)
 
     assert len(collect_metrics) == 1
     _, tags, fields = collect_metrics[0]
-    assert tags == {"tool": "stack_action", "action": "restart"}
+    assert tags == {"tool": "stack_action", "action": "start"}
     # The fix: the total spans the poll the caller actually waited through.
     assert fields["duration_s"] >= POLL_DELAY
     # The old value is kept, correctly labelled, so initial-POST latency is still
@@ -211,6 +213,9 @@ async def test_update_container_does_not_poll_a_job(mock_env, collect_metrics):
     genuinely returns one.
     """
     with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
         )
@@ -277,11 +282,14 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
         mock.post("/api/containers/abc123/start").mock(
             return_value=httpx.Response(200, json={"success": True})
         )
+        # Both answer directly. These used to be mocked with a jobId, a shape
+        # neither route returns (check-updates: {total, updatesFound, results};
+        # restart: {success, output}, measured on 1.0.55).
         mock.post("/api/stacks/searxng/restart").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+            return_value=httpx.Response(200, json={"success": True, "output": ""})
         )
         mock.post("/api/containers/check-updates").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+            return_value=httpx.Response(200, json={"total": 0, "updatesFound": 0, "results": []})
         )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
@@ -290,8 +298,9 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
             return_value=httpx.Response(200, json={"imageName": "nginx:latest"})
         )
         # Phase 6 read-only surface.
+        # Serves inspect_container, and update_container's name-to-id resolve.
         mock.get("/api/containers/abc123").mock(
-            return_value=httpx.Response(200, json={"Id": "abc123", "Config": {"Env": []}})
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
         )
         mock.get("/api/containers/abc123/logs").mock(
             return_value=httpx.Response(200, json={"logs": ""})
