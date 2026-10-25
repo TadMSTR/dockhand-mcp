@@ -51,7 +51,7 @@ dev = [
 dockhand-mcp = "dockhand_mcp.server:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["dockhand_mcp*"]
 
 [tool.pytest.ini_options]

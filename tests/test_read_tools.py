@@ -553,7 +553,7 @@ def test_readme_documents_every_tool():
 
     from .test_tool_errors_and_metrics import ALL_TOOLS
 
-    readme = pathlib.Path(server.__file__).parent.parent / "README.md"
+    readme = pathlib.Path(server.__file__).parents[2] / "README.md"
     table = readme.read_text().split("## Tool Reference", 1)[1].split("\n## ", 1)[0]
     documented = set(_re.findall(r"^\| `(\w+)`", table, _re.MULTILINE))
 

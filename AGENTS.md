@@ -21,7 +21,7 @@ Provides MCP tools to inspect, control, and update Docker containers and stacks 
 ## Structure
 
 ```
-dockhand_mcp/
+src/dockhand_mcp/
   server.py          FastMCP server — 9 tools
   client.py          DockhandClient — async httpx wrapper, get_client() factory
   pin_report.py      Digest-pin report reader + pin_assessment overlay (file read only)

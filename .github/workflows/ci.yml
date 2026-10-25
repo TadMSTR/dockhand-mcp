@@ -34,7 +34,7 @@ jobs:
           pip install -e ".[dev]" ruff pip-audit
 
       - name: Lint (ruff)
-        run: ruff check dockhand_mcp tests
+        run: ruff check src tests
 
       - name: Format check (ruff)
         run: ruff format --check .
