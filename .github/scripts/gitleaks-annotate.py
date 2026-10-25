@@ -13,7 +13,14 @@ import sys
 
 def _clean(value: object) -> str:
     # Workflow-command metacharacters would end or split the annotation.
-    return str(value).replace("%", "%25").replace("\r", "").replace("\n", "").replace(",", "%2C")
+    return (
+        str(value)
+        .replace("%", "%25")
+        .replace("\r", "")
+        .replace("\n", "")
+        .replace(",", "%2C")
+        .replace(":", "%3A")
+    )
 
 
 def main(path: str) -> int:
