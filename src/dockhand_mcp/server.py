@@ -117,6 +117,10 @@ def _tool_error(tool: str, err: Exception) -> dict:
     # agent. Loopback-only service, trusted forge-agent callers, no secrets or
     # stack traces in the message. Accepted 2026-07-25 (audit
     # dockhand-mcp-env-param-fix; same class as memsearch-mcp / nextcloud-mcp).
+    # Re-confirmed 2026-10-25 with one more covered source: httpx transport-
+    # exception text (TRANSPORT_FAILURE), which names the DOCKHAND_ENDPOINT
+    # connection target, a loopback host:port and not a secret.
+    # Audit: 2026-10-25/dockhand-2026-10-p2-mcp F-02.
     log.error(
         "tool_error",
         tool=tool,
@@ -1520,6 +1524,18 @@ async def stack_action(
         )
         data = json_body(resp) if resp.content else {"status": "ok"}
         data = await _finalize_job(client, data)
+        # The action's own compose output gets the same mask as the log tools.
+        # The env dump was measured in Dockhand's stdout, not in this field, but
+        # this is the one tool whose call triggers the dump, so its result is
+        # masked too (audit 2026-10-25/dockhand-2026-10-p2-mcp F-03).
+        if isinstance(data, dict):
+            masked_total = 0
+            for key in ("output", "error"):
+                if isinstance(data.get(key), str):
+                    data[key], masked = mask_env_dump(data[key])
+                    masked_total += masked
+            if masked_total:
+                data["masked_lines"] = masked_total
         duration = time.perf_counter() - t0
         log.info(
             "stack_action",

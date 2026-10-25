@@ -43,6 +43,9 @@ The package moved to `src/`, and an editable install records paths.
   Userinfo now ends at the last `@` in a URL token. Before, `postgres://u:p/ss@db` passed
   through and `u:p@ss@db` leaked the password's tail. The same scrub runs on the string
   fields of `list_schedules`, `get_schedule_executions` and `list_stack_deploys`.
+- `stack_action`'s own result (`output`, `error`) gets the same env-dump mask as the log
+  tools (`masked_lines` when anything was removed). This is the one tool whose call triggers
+  the dump.
 - `get_version_notes` labels its response `content_trust: untrusted`. The note bodies are
   third-party text.
 - **`DOCKHAND_ALLOWED_ENVS`**, which pins an instance to a set of environments (#1027). It is a

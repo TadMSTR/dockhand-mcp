@@ -110,6 +110,36 @@ async def test_stack_action_without_the_flag_makes_zero_requests(mock_env, actio
     assert "acknowledge_env_log=true" in result["error"]
 
 
+@pytest.mark.parametrize("field", ["output", "error"])
+async def test_stack_action_result_is_masked(mock_env, field):
+    """F-03: the one tool whose call triggers the dump gets the same mask on its
+    own result as the log tools get."""
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.post("/api/stacks/searxng/deploy").mock(
+            return_value=httpx.Response(
+                200, json={"success": field == "output", field: MASK_CASES["multi_line_quoted"]}
+            )
+        )
+        result = await server.stack_action(
+            stack_name="searxng", action="deploy", acknowledge_env_log=True
+        )
+    assert ML_CANARY not in str(result)
+    assert result["masked_lines"] > 0
+
+
+async def test_stack_action_plain_output_is_untouched(mock_env):
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.post("/api/stacks/searxng/restart").mock(
+            return_value=httpx.Response(
+                200, json={"success": True, "output": " Container x Started"}
+            )
+        )
+        result = await server.stack_action(
+            stack_name="searxng", action="restart", acknowledge_env_log=True
+        )
+    assert result == {"success": True, "output": " Container x Started"}
+
+
 @pytest.mark.parametrize("action", ["start", "stop", "restart", "deploy"])
 async def test_stack_action_with_the_flag_sends_the_request(mock_env, action):
     with respx.mock(base_url=ENDPOINT) as mock:

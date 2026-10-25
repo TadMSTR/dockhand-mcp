@@ -296,6 +296,11 @@ def mask_env_dump(text: str) -> tuple[str, int]:
     can cut a block: with the end marker missing, the block is masked to the end
     of the text; with the start missing, the N lines before ``Total lines: N``
     are masked. A quoted multi-line value that never closes is masked to the end.
+
+    SECURITY[accepted]: with BOTH markers outside a since/until window, a short
+    keyless continuation line (not an opaque token) passes through: nothing in
+    the text marks it as env content. Long opaque lines are masked by shape.
+    Documented in the README. Audit: 2026-10-25/dockhand-2026-10-p2-mcp F-04.
     """
     if not isinstance(text, str) or not text:
         return text, 0
