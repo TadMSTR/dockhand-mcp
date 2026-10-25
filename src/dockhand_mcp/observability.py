@@ -8,6 +8,7 @@ No import errors if optional packages are absent.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -368,10 +369,8 @@ class ToolTracingMiddleware(Middleware):
             return await call_next(context)
         tool_name = getattr(context.message, "name", "unknown")
         with tracer.start_as_current_span(f"dockhand.tool.{tool_name}") as span:
-            try:
+            with contextlib.suppress(Exception):
                 span.set_attribute("mcp.tool.name", tool_name)
-            except Exception:
-                pass
             try:
                 return await call_next(context)
             except Exception as exc:

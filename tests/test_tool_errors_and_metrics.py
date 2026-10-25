@@ -14,6 +14,8 @@ ever exercised the happy path with a fully-configured environment:
   121-135 s for calls whose metric said ~0.1 s.
 """
 
+from __future__ import annotations
+
 import asyncio
 
 import httpx
@@ -26,6 +28,7 @@ from dockhand_mcp import server
 from .conftest import (
     BATCH_UPDATE_SUCCESS,
     ENDPOINT,
+    INSPECT_FOR_RESOLVE,
     JOB_DONE_SUCCESS,
     JOB_QUEUED,
     STACKS_RESPONSE,
@@ -40,7 +43,7 @@ ALL_TOOLS = [
     ("list_stacks", {}),
     ("get_activity", {}),
     ("container_action", {"container_id": "abc123", "action": "start"}),
-    ("stack_action", {"stack_name": "searxng", "action": "restart"}),
+    ("stack_action", {"stack_name": "searxng", "action": "restart", "acknowledge_env_log": True}),
     ("check_updates", {}),
     ("update_container", {"container_id": "abc123"}),
     ("scan_image", {"image_name": "nginx:latest"}),
@@ -54,6 +57,19 @@ ALL_TOOLS = [
     ("list_networks", {}),
     ("get_pending_updates", {}),
     ("get_host_info", {}),
+    # 1.0.55 read surface (dockhand-2026-10 p2).
+    ("get_stack_stats", {}),
+    ("get_disk_usage", {}),
+    ("get_vulnerability_summary", {}),
+    ("list_stack_deploys", {"stack_name": "searxng"}),
+    ("get_stack_deploy_log", {"stack_name": "searxng", "run_id": 7}),
+    ("get_version_notes", {"container_id": "abc123", "versions": "1.2.3"}),
+    ("list_schedules", {}),
+    ("get_schedule_executions", {}),
+    ("get_activity_stats", {}),
+    ("get_scheduled_actions", {"container_name": "nginx"}),
+    ("get_auto_update_policy", {"container_name": "nginx"}),
+    ("validate_stack", {"stack_name": "searxng", "compose": "services: {}"}),
 ]
 
 
@@ -181,15 +197,16 @@ def slow_job(monkeypatch):
 @pytest.mark.asyncio
 async def test_stack_action_duration_includes_the_job_poll(mock_env, slow_job, collect_metrics):
     with respx.mock(base_url=ENDPOINT) as mock:
-        mock.post("/api/stacks/searxng/restart").mock(
+        # start, not restart: the spec documents a jobId on start, not on restart.
+        mock.post("/api/stacks/searxng/start").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )
 
-        await server.stack_action(stack_name="searxng", action="restart")
+        await server.stack_action(stack_name="searxng", action="start", acknowledge_env_log=True)
 
     assert len(collect_metrics) == 1
     _, tags, fields = collect_metrics[0]
-    assert tags == {"tool": "stack_action", "action": "restart"}
+    assert tags == {"tool": "stack_action", "action": "start"}
     # The fix: the total spans the poll the caller actually waited through.
     assert fields["duration_s"] >= POLL_DELAY
     # The old value is kept, correctly labelled, so initial-POST latency is still
@@ -211,6 +228,9 @@ async def test_update_container_does_not_poll_a_job(mock_env, collect_metrics):
     genuinely returns one.
     """
     with respx.mock(base_url=ENDPOINT, assert_all_called=False) as mock:
+        mock.get("/api/containers/abc123def456").mock(
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
+        )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
         )
@@ -277,11 +297,14 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
         mock.post("/api/containers/abc123/start").mock(
             return_value=httpx.Response(200, json={"success": True})
         )
+        # Both answer directly. These used to be mocked with a jobId, a shape
+        # neither route returns (check-updates: {total, updatesFound, results};
+        # restart: {success, output}, measured on 1.0.55).
         mock.post("/api/stacks/searxng/restart").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+            return_value=httpx.Response(200, json={"success": True, "output": ""})
         )
         mock.post("/api/containers/check-updates").mock(
-            return_value=httpx.Response(200, json=JOB_QUEUED)
+            return_value=httpx.Response(200, json={"total": 0, "updatesFound": 0, "results": []})
         )
         mock.post("/api/containers/batch-update").mock(
             return_value=httpx.Response(200, json=BATCH_UPDATE_SUCCESS)
@@ -290,8 +313,9 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
             return_value=httpx.Response(200, json={"imageName": "nginx:latest"})
         )
         # Phase 6 read-only surface.
+        # Serves inspect_container, and update_container's name-to-id resolve.
         mock.get("/api/containers/abc123").mock(
-            return_value=httpx.Response(200, json={"Id": "abc123", "Config": {"Env": []}})
+            return_value=httpx.Response(200, json=INSPECT_FOR_RESOLVE)
         )
         mock.get("/api/containers/abc123/logs").mock(
             return_value=httpx.Response(200, json={"logs": ""})
@@ -309,6 +333,45 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
         mock.get("/api/host").mock(return_value=httpx.Response(200, json={"hostname": "forge"}))
         mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
+        )
+        # 1.0.55 read surface.
+        mock.get("/api/stack-stats").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/system/disk").mock(
+            return_value=httpx.Response(200, json={"diskUsage": None})
+        )
+        mock.get("/api/vulnerabilities/count").mock(
+            return_value=httpx.Response(200, json={"total": 0, "summary": {}})
+        )
+        mock.get("/api/vulnerabilities").mock(
+            return_value=httpx.Response(200, json={"findings": [], "total": 0})
+        )
+        mock.get("/api/stacks/searxng/deploys").mock(
+            return_value=httpx.Response(200, json={"runs": []})
+        )
+        mock.get("/api/stacks/searxng/deploys/7").mock(
+            return_value=httpx.Response(200, json={"id": 7, "environmentId": 1})
+        )
+        mock.get("/api/stacks/searxng/deploys/7/log").mock(
+            return_value=httpx.Response(200, text="ok\n")
+        )
+        mock.get("/api/containers/abc123/version-notes").mock(
+            return_value=httpx.Response(200, json={"notes": []})
+        )
+        mock.get("/api/schedules").mock(return_value=httpx.Response(200, json={"schedules": []}))
+        mock.get("/api/schedules/executions").mock(
+            return_value=httpx.Response(200, json={"executions": [], "total": 0})
+        )
+        mock.get("/api/activity/stats").mock(
+            return_value=httpx.Response(200, json={"total": 0, "today": 0})
+        )
+        mock.get("/api/scheduled-actions/nginx").mock(
+            return_value=httpx.Response(200, json={"enabled": False})
+        )
+        mock.get("/api/auto-update/nginx").mock(
+            return_value=httpx.Response(200, json={"enabled": False})
+        )
+        mock.post("/api/stacks/searxng/validate").mock(
+            return_value=httpx.Response(200, json={"findings": [], "counts": {}})
         )
 
         for tool_name, kwargs in ALL_TOOLS:

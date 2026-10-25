@@ -21,7 +21,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -61,7 +61,7 @@ ALL_REPORT_STATUSES = [
 def _fresh(report: dict, age: timedelta = timedelta(hours=1)) -> dict:
     """The fixture with ``generated`` moved to ``age`` before the test's clock."""
     out = copy.deepcopy(report)
-    out["generated"] = (datetime.now(timezone.utc) - age).isoformat()
+    out["generated"] = (datetime.now(UTC) - age).isoformat()
     return out
 
 
@@ -81,7 +81,8 @@ async def _check_updates(dockhand_response: dict) -> dict:
         mock.post("/api/containers/check-updates").mock(
             return_value=httpx.Response(200, json=dockhand_response)
         )
-        return await server.check_updates()
+        # include_all: these tests assert on every row, not the attention filter.
+        return await server.check_updates(include_all=True)
 
 
 def _by_name(result: dict) -> dict:
@@ -92,6 +93,8 @@ def _strip_overlay(result: dict) -> dict:
     """The response with every overlay key removed: what Dockhand sent."""
     out = copy.deepcopy(result)
     out.pop("digest_pins", None)
+    out.pop("attention_summary", None)
+    out.pop("filtered", None)
     for row in out.get("results", []):
         row.pop("pin_assessment", None)
     return out
@@ -164,7 +167,7 @@ async def test_dockhand_fields_are_passed_through_untouched(mock_env, monkeypatc
     assert result["updatesFound"] == 25
 
 
-@pytest.mark.parametrize("status", ALL_REPORT_STATUSES + ["pin-missing"])
+@pytest.mark.parametrize("status", [*ALL_REPORT_STATUSES, "pin-missing"])
 @pytest.mark.asyncio
 async def test_report_status_passes_through_verbatim(mock_env, monkeypatch, tmp_path, status):
     """All 10 schema-v1 statuses, hyphens intact, plus one this code has never
@@ -354,9 +357,13 @@ def test_invalid_max_age_falls_back_to_default(monkeypatch, raw):
 
 def test_report_path_is_not_a_tool_argument():
     """A caller must not be able to point the server at an arbitrary file."""
-    for tool in (server.check_updates, server.get_pending_updates):
+    expected = {
+        server.check_updates: ["environment_id", "include_all"],
+        server.get_pending_updates: ["environment_id"],
+    }
+    for tool, params in expected.items():
         fn = getattr(tool, "fn", tool)
-        assert list(inspect.signature(fn).parameters) == ["environment_id"]
+        assert list(inspect.signature(fn).parameters) == params
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +468,11 @@ async def test_pending_updates_live_shape_has_no_pinned_rows(mock_env, monkeypat
 
     result = await _pending(copy.deepcopy(PENDING_UPDATES_LIVE))
 
-    assert result["pendingUpdates"] == PENDING_UPDATES_LIVE["pendingUpdates"]
+    # Dockhand's own fields pass through; staleness is added beside them.
+    added = {"checked_age_hours", "stale"}
+    assert [
+        {k: v for k, v in row.items() if k not in added} for row in result["pendingUpdates"]
+    ] == PENDING_UPDATES_LIVE["pendingUpdates"]
     assert result["total"] == 1
     assert result["withUpdateAvailable"] == 1
     assert result["digest_pins"] == {

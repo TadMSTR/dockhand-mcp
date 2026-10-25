@@ -1,0 +1,67 @@
+# CodeQL static analysis.
+#
+# Free here because the repository is public — CodeQL requires a GitHub Advanced
+# Security licence only on private repositories.
+#
+# TWO languages (repo standard F3; searxng-mcp is the reference):
+#   python   src/ and tests/
+#   actions  the workflow files themselves. release.yml holds `contents: write`;
+#            adding CI without scanning CI is how injection into a workflow
+#            `run:` block goes unnoticed.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly. A scheduled run is not redundant with the push/PR triggers: CodeQL
+    # ships new queries, so code that was clean when it landed can become a
+    # finding without anyone touching it. Sunday 04:17 UTC — an off-peak minute
+    # rather than :00, which is when everyone else's cron fires.
+    - cron: "17 4 * * 0"
+
+# Least privilege at the top level; the analyse job adds only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload the SARIF results to the Security tab.
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, actions]
+
+    steps:
+      # Pinned by commit SHA, like ci.yml. These jobs hold `security-events: write`.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          # security-and-quality is a superset of the default suite. This is a
+          # small codebase and the extra queries are worth the runtime.
+          queries: security-and-quality
+
+      # No build step: CodeQL analyses Python from source.
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}

@@ -8,26 +8,22 @@ Provides MCP tools to inspect, control, and update Docker containers and stacks 
 
 ## Tools
 
-- `get_health` — Dockhand service health check.
-- `list_containers` — All containers with status.
-- `list_stacks` — All Compose stacks.
-- `container_action(id, action, environment_id=None)` — start / stop / restart / pause / unpause / remove.
-- `stack_action(name, action, environment_id=None)` — start / stop / restart / deploy (async; waits for the job).
-- `check_updates(environment_id=None)` — Check for available image updates.
-- `update_container(id, environment_id=None)` — Pull and recreate a container with a newer image (async; waits for the job).
-- `scan_image(image)` — Security scan an image.
-- `get_activity` — Recent Dockhand activity log.
+30 tools. The README's Tool Reference table is the list, and a test keeps the two in step.
+The lifecycle tools are `container_action`, `stack_action` and `update_container` (HITL-gated
+in scoped-mcp); everything else is read only.
 
 ## Structure
 
 ```
-dockhand_mcp/
-  server.py          FastMCP server — 9 tools
-  client.py          DockhandClient — async httpx wrapper, get_client() factory
+src/dockhand_mcp/
+  server.py          FastMCP server — 30 tools
+  client.py          DockhandClient — async httpx wrapper, env resolution + pin, get_client()
+  redaction.py       Value-shape redaction, env-dump masking, compose redaction
   pin_report.py      Digest-pin report reader + pin_assessment overlay (file read only)
   observability.py   configure_logging() (structlog JSON), emit_metric() (InfluxDB)
 tests/               pytest with respx mocks
 pyproject.toml
+uv.lock              the tested and audited dependency tree
 ```
 
 ## Dependencies
@@ -55,7 +51,11 @@ pyproject.toml
 ## Key architecture decisions
 
 - **Input validation before API calls** — container and stack IDs are validated against `_SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-\.]*$")` before being sent to Dockhand. Do not relax this regex.
-- **`DockhandError` / `DockhandConfigError`** — `client.py` raises these typed exceptions. Tool handlers catch them and return structured error responses rather than letting exceptions propagate.
+- **`DockhandError` / `DockhandConfigError`** — `client.py` raises these typed exceptions, including for a transport failure or a non-JSON body (`status_code` 0). Tool handlers catch them and return structured error responses rather than letting exceptions propagate. Decode with `json_body(resp)`, never `resp.json()`.
+- **`stack_action` requires `acknowledge_env_log=true`** on every action, refused with zero requests otherwise: Dockhand logs the stack's `.env` on all four. Do not relax it to a subset of actions or to a truthy value.
+- **Every text a tool returns from Dockhand's logs goes through `mask_env_dump`** (container logs, deploy logs, schedule-execution logs). Mask before truncating, never after. Never reduce the redaction in `redaction.py` to a key-name list.
+- **`DOCKHAND_ALLOWED_ENVS`** is enforced in `resolve_env` and `env_filter`. A new tool resolves its env through one of them, and a route with no env parameter must check the env of what it reads (see `get_stack_deploy_log`).
+- **No new POST/DELETE without a HITL line.** `test_contract.py` pins the set of tools that mutate; exec, files and the other excluded routes in the README stay unwrapped.
 - **Environment resolution** — every Dockhand endpoint reads the environment from a `?env=<int>` query param and silently returns `[]` (or fails the async job) when it is missing. `DockhandClient.resolve_env(environment_id)` centralises the `arg → DOCKHAND_DEFAULT_ENV → DockhandConfigError` precedence; all list/action tools call it and pass `params={"env": ...}`. Never send env in a JSON body — the handlers ignore it there.
 - **Async job polling** — stack actions and `update_container` return `{"jobId": ...}` and run in the background. `DockhandClient.poll_job()` polls `GET /api/jobs/{jobId}` to a terminal state and returns `{success, output|error}`; `server._finalize_job()` wires this into the tools so callers get a real verdict, not an opaque handle. `deploy` additionally requires a JSON body (`{pull, build, forceRecreate}`) or the handler 500s.
 
@@ -64,11 +64,11 @@ pyproject.toml
 ## Testing
 
 ```bash
-pip install -e ".[dev]"
-pytest
+uv sync --frozen --extra dev
+uv run --frozen pytest --cov
 ```
 
-Tests use respx to mock httpx calls — no live Dockhand instance required.
+Tests use respx to mock httpx calls — no live Dockhand instance required. `test_protocol.py` goes through `fastmcp.Client`, so schemas and argument validation are covered too.
 
 ## Git workflow
 

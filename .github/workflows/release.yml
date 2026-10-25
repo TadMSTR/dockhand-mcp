@@ -5,8 +5,9 @@ on:
     tags:
       - "v*"
 
+# Read-only at the top; only the job that creates the release can write (F6).
 permissions:
-  contents: write # Required for gh release create
+  contents: read
 
 # dockhand-mcp is a service, not a published package — source-only release
 # (no PyPI). A tag `vX.Y.Z` cuts a GitHub Release with auto-generated notes.
@@ -14,11 +15,14 @@ jobs:
   create-github-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required for gh release create
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Create GitHub Release (source only)
         env:

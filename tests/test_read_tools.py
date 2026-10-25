@@ -7,6 +7,8 @@ code happens to do. The repo has been burned once by a test that asserted the
 same wrong thing the code sent (vikunja#702).
 """
 
+from __future__ import annotations
+
 import httpx
 import pytest
 import respx
@@ -208,7 +210,7 @@ async def test_inspect_container_never_calls_the_unmasked_inspect_route(mock_env
     [
         "ANTHROPIC_API_KEY=sk-ant-live-supersecret",
         "POSTGRES_PASSWORD=hunter2",
-        "AUTHENTIK_SECRET_KEY=abcdef123456",
+        "AUTHENTIK_SECRET_KEY=abcdef123456",  # gitleaks:allow
         "DOCKHAND_API_TOKEN=dh-live-token",
         "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI",
         "BACKREST_REPO_PASSWORD=repo-pass",
@@ -224,9 +226,9 @@ async def test_inspect_container_never_calls_the_unmasked_inspect_route(mock_env
         "POSTGRES_PWD=e3b0c44298fc1c149afbf4c8996fb924",
         "DFLY_requirepass=27ae41e4649b934ca495991b7852b855",
         "RABBITMQ_DEFAULT_PASS=da39a3ee5e6b4b0d3255bfef95601890",
-        "NEO4J_AUTH=neo4j/5e884898da28047151d0e56f8dc62927",
-        "REDIS_AUTH=6b86b273ff34fce19d6b804eff5a3f57",
-        "CREDS_IV=d4735e3a265e16eee03f59718b9b5d03",
+        "NEO4J_AUTH=neo4j/5e884898da28047151d0e56f8dc62927",  # gitleaks:allow
+        "REDIS_AUTH=6b86b273ff34fce19d6b804eff5a3f57",  # gitleaks:allow
+        "CREDS_IV=d4735e3a265e16eee03f59718b9b5d03",  # gitleaks:allow
     ],
 )
 @pytest.mark.asyncio
@@ -502,6 +504,23 @@ def _route_literals() -> set[str]:
         "/inspect",
         # Return a stack's environment variables with no masking rationale.
         "/env",
+        # git/stacks/{id}/env-files.
+        "/env-files",
+        # F-05: shell into a container, and write to its filesystem.
+        "/exec",
+        "/exec/run",
+        "/files",
+        "/files/chown",
+        # Lists Dockhand's own filesystem.
+        "/system/files",
+        # Hawser agent tokens, backups and restore, secret providers, registries.
+        "/hawser",
+        "/backup",
+        "/restore",
+        "/secret-providers",
+        "/registries",
+        # Prune is destructive and has no HITL line in any manifest.
+        "/prune",
     ],
 )
 def test_no_forbidden_route_is_reachable(forbidden):
@@ -518,7 +537,9 @@ def test_no_forbidden_route_is_reachable(forbidden):
 def test_route_surface_matches_the_declared_allowlist():
     """A new route must be added here deliberately, with the security question asked."""
     expected = {
-        "/api/activity?limit={min(limit, 100)}&offset={offset}",
+        "/api/activity",
+        "/api/activity/stats",
+        "/api/auto-update/{container_name}",
         "/api/containers",
         "/api/containers/batch-update",
         "/api/containers/check-updates",
@@ -526,17 +547,30 @@ def test_route_surface_matches_the_declared_allowlist():
         "/api/containers/{container_id}",
         "/api/containers/{container_id}/logs",
         "/api/containers/{container_id}/stats",
+        "/api/containers/{container_id}/version-notes",
         "/api/containers/{container_id}/{action}",
+        "/api/containers/{container}",
         "/api/health",
         "/api/host",
         "/api/images",
         "/api/images/scan",
         "/api/jobs/{job_id}",
         "/api/networks",
+        "/api/scheduled-actions/{container_name}",
+        "/api/schedules",
+        "/api/schedules/executions",
+        "/api/stack-stats",
         "/api/stacks",
         "/api/stacks/{stack_name}/compose",
+        "/api/stacks/{stack_name}/deploys",
+        "/api/stacks/{stack_name}/deploys/{run_id}",
+        "/api/stacks/{stack_name}/deploys/{run_id}/log",
+        "/api/stacks/{stack_name}/validate",
         "/api/stacks/{stack_name}/{action}",
+        "/api/system/disk",
         "/api/volumes",
+        "/api/vulnerabilities",
+        "/api/vulnerabilities/count",
     }
     assert _route_literals() == expected
 
@@ -553,7 +587,7 @@ def test_readme_documents_every_tool():
 
     from .test_tool_errors_and_metrics import ALL_TOOLS
 
-    readme = pathlib.Path(server.__file__).parent.parent / "README.md"
+    readme = pathlib.Path(server.__file__).parents[2] / "README.md"
     table = readme.read_text().split("## Tool Reference", 1)[1].split("\n## ", 1)[0]
     documented = set(_re.findall(r"^\| `(\w+)`", table, _re.MULTILINE))
 

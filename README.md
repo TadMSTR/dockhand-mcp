@@ -13,27 +13,38 @@ Gives an AI agent structured access to Docker container and stack management on 
 |------|-------------|
 | `get_health` | Dockhand health status and timestamp |
 | `list_containers` | All containers: name, image, status, environment |
-| `list_stacks` | All Compose stacks: name, status, container count |
+| `list_stacks` | Compose stacks, **compact by default**: status, health, counts, and each container's name/service/state. `detail=true` or `names=[...]` for full rows |
 | `list_images` | All images: id, tags, size, created |
 | `list_volumes` | All volumes: name, driver, mountpoint, labels |
 | `list_networks` | All networks: name, driver, scope, attached containers |
 | `get_host_info` | Docker host: hostname, IP, CPU, memory, uptime |
 | `inspect_container` | Full container config — **secret-shaped env vars redacted**, see [Secrets](#secrets-in-inspect_container) |
-| `get_container_logs` | Combined stdout/stderr, `tail` bounded to 100 by default |
+| `get_container_logs` | Combined stdout/stderr, `tail` bounded to 100 by default. **Env-file dumps masked**, see [Env-File Dumps](#env-file-dumps-in-dockhands-log) |
 | `get_container_stats` | One-shot CPU / memory / network / block-IO snapshot |
-| `get_stack_compose` | A stack's compose content and resolved compose/env paths |
-| `get_pending_updates` | Containers with an image update available, from the last check |
+| `get_stack_compose` | A stack's compose content and resolved compose/env paths. Inline secret-shaped values redacted |
+| `get_pending_updates` | Containers with an image update available, from the last check. Rows older than 7 days are flagged `stale` |
 | `container_action` | start / stop / restart / pause / unpause / remove a container |
-| `stack_action` | start / stop / restart / deploy a stack |
-| `check_updates` | Run an image update check across all containers (synchronous). Pinned rows carry a `pin_assessment` — see [Digest-Pinned Images](#digest-pinned-images-pin_assessment) |
-| `update_container` | Re-pull a container's image and recreate it in place |
+| `stack_action` | start / stop / restart / deploy a stack. **Requires `acknowledge_env_log=true`**, see [Stack Actions](#stack-actions) |
+| `check_updates` | Run an image update check across all containers (synchronous). **Returns only rows needing attention** unless `include_all=true`. Pinned rows carry a `pin_assessment` — see [Digest-Pinned Images](#digest-pinned-images-pin_assessment) |
+| `update_container` | Re-pull a container's image and recreate it in place. Accepts a name or an id |
 | `scan_image` | Trivy/Grype CVE scan by image name |
-| `get_activity` | Recent Dockhand operations log |
+| `get_activity` | Recent Dockhand operations log, filterable by container, action and date |
+| `get_activity_stats` | Event totals, today's count, and counts by action (restart loops show here) |
+| `get_stack_stats` | CPU / memory / network / block-IO snapshot per stack |
+| `get_disk_usage` | `docker system df` totals and the ten largest images and volumes |
+| `get_vulnerability_summary` | Stored scan totals by severity, plus one filtered page of findings |
+| `list_stack_deploys` | A stack's deploy history: when, who, options, what changed |
+| `get_stack_deploy_log` | One deploy run's compose output, masked like `get_container_logs` |
+| `validate_stack` | Lint a stack's compose file (or an edit of it) with Dockhand's preflight validator |
+| `get_version_notes` | Upstream release notes for the versions an update would cross |
+| `list_schedules` | Dockhand's schedules: auto-updates, start/stop, git syncs, prune, backups |
+| `get_schedule_executions` | Schedule run history, logs masked |
+| `get_scheduled_actions` | A container's scheduled start/stop times (read only) |
+| `get_auto_update_policy` | A container's auto-update setting (read only) |
 
-All tools except `get_health` and `get_activity` accept an optional `environment_id`.
-Dockhand exposes 257 routes; this server wraps the read and lifecycle subset above.
-Write operations beyond the lifecycle actions — `exec`, `prune`, volume clone, image
-delete, batch — are deliberately not wrapped.
+Every tool except `get_health` accepts an optional `environment_id`, as an integer or a
+string. Dockhand 1.0.55 exposes 285 routes; this server wraps the read and lifecycle subset
+above. See [Excluded Routes](#excluded-routes) for what is deliberately not wrapped.
 
 ## Container Actions
 
@@ -62,17 +73,23 @@ delete, batch — are deliberately not wrapped.
 `deploy` sends a JSON body `{"pull": …, "build": …, "forceRecreate": …}`; the other stack
 actions send no body at all.
 
-Those three are exposed as arguments, defaulting to `pull=True`, `build=False`,
-`force_recreate=False` — the values the tool previously hardcoded:
+**Every action requires `acknowledge_env_log=true`.** Dockhand prints the stack's whole
+`.env` file to its own stdout on all four actions (measured on 1.0.55 with a canary stack),
+so every secret in it lands in `docker logs dockhand`, and in any log pipeline that ships
+that container. Without the flag the call is refused before any request is made, with an
+error naming the alternative: run `docker compose` for the stack directly. The flag also
+puts the choice into the arguments a HITL approval prompt shows.
 
 ```python
-stack_action("searxng", "deploy")  # compose up -d --pull always
-stack_action("searxng", "deploy", pull=False)  # compose up -d
+stack_action("searxng", "deploy", acknowledge_env_log=True)  # compose up -d
+stack_action("searxng", "deploy", acknowledge_env_log=True, pull=True)  # --pull always
 ```
 
-`pull=True` becomes `--pull always`, which re-resolves every image and can recreate
-services you did not intend to touch. `pull=False` gives a plain `docker compose up -d`,
-which recreates only services whose resolved config actually changed.
+`deploy`'s three body flags default to `pull=False`, `build=False`, `force_recreate=False`
+(`pull` defaulted to `True` before 0.8.0). `pull=False` gives a plain `docker compose up -d`,
+which recreates only services whose resolved config changed, and still pulls a digest pin
+that is not present locally. `pull=True` becomes `--pull always`, which re-resolves every
+image and can recreate services you did not intend to touch.
 
 Passing any of the three to `start`/`stop`/`restart` is an error rather than a silent
 no-op — those routes send no body, so Dockhand would never receive the flag.
@@ -89,19 +106,40 @@ the environment as:
 explicit environment_id argument  →  DOCKHAND_DEFAULT_ENV  →  clear DockhandConfigError
 ```
 
-Every tool except `get_health` and `get_activity` accepts an optional `environment_id`.
+Every tool except `get_health` accepts an optional `environment_id`.
 `get_pending_updates` is the one route where Dockhand documents `env` as **required**
 rather than optional. In practice set
 `DOCKHAND_DEFAULT_ENV` once (see [Getting the Environment ID](#getting-the-environment-id))
-and omit the argument.
+and omit the argument. A few routes treat the environment as an optional *filter*
+(`get_activity`, `get_activity_stats`, `list_schedules`, `get_schedule_executions`,
+`scan_image`); there, no `environment_id` means every environment.
+
+### Pinning an instance: `DOCKHAND_ALLOWED_ENVS`
+
+Set `DOCKHAND_ALLOWED_ENVS` to a comma-separated list of environment ids to confine an
+instance to them, for example a second instance for an agent that should only reach one
+remote host:
+
+- an environment outside the list is refused before any request;
+- with more than one id listed, `environment_id` is required and the default is not applied;
+- the optional-filter routes above are always filtered to the pin, and schedules or
+  executions from other environments (including Dockhand's own system schedules) are dropped;
+- a deploy log is read only after its run's environment is checked.
+
+Unset, behaviour is unchanged.
+
+**This is a dockhand-mcp-side pin, not a Dockhand permission.** The Dockhand API token is
+valid for every environment, so the pin is only as strong as the pinned instance's own
+configuration and the isolation of its port. Run it with its own bearer on its own port,
+and give the confined agent no route to the unpinned instance.
 
 ## Asynchronous Actions
 
-Only some Dockhand routes are asynchronous, and the split is not the intuitive one. Derived
-from the v1.0.46 OpenAPI spec, `jobId` is documented on exactly six routes; of the ones this
-server calls, only **`stack_action` with `start` or `stop`** returns one.
-
-Those poll `GET /api/jobs/{jobId}` to completion and return the terminal result:
+The 1.0.55 spec documents a `jobId` on `stack_action`'s `start` and `stop`, and describes
+`restart` and `deploy` as Server-Sent Events streams. With this client's
+`Accept: application/json`, **all four answered `{success, output|error}` directly** when
+measured on a live 1.0.55 instance (2026-10-25). If a `jobId` does come back, it is polled
+on `GET /api/jobs/{jobId}` to completion and the terminal result is returned:
 
 ```json
 { "jobId": "…", "success": true,  "output": " Container searxng Started \n" }
@@ -110,8 +148,7 @@ Those poll `GET /api/jobs/{jobId}` to completion and return the terminal result:
 
 So a returned `success: false` is a real failure, not a queued job you have to chase down.
 
-Everything else answers directly and is **not** polled — including `stack_action("…",
-"deploy")`, `update_container`, and `check_updates`. `check_updates` in particular returns
+Nothing else is polled: `update_container` and `check_updates` answer directly too. `check_updates` in particular returns
 its final result rather than a job handle, because the route offers a `text/event-stream`
 feed *"or, with `Accept: application/json`, the final result as plain JSON"*, and this
 client sets that header on every request. Expect it to be slow: it contacts a registry per
@@ -131,9 +168,13 @@ To update a container to its latest image:
 3. scan_image("nginx:latest")
    → review CVE count before pulling
 
-4. update_container(container_id)
+4. update_container("nginx")
    → re-pulls the image and recreates the container in place
 ```
+
+`update_container` takes a container name, a short id or a full id. batch-update matches
+full ids only, so the name is resolved with a read first; a name that does not resolve is
+an error and nothing is updated. (Before 0.8.0 a name failed *after* the HITL approval.)
 
 `update_container` posts to `/api/containers/batch-update`, which inspects the container
 server-side, pulls its image and recreates it with full Config/HostConfig passthrough. It
@@ -206,7 +247,15 @@ this reader is updated for the new version.
 
 ## Known Limitations
 
-Three things this server cannot do, none of which are fixable in this repo.
+Four things this server cannot do, none of which are fixable in this repo.
+
+**Dockhand logs a stack's `.env` on every stack action.** `parseEnvFileContent()` prints the
+whole file, and then a "Skipped lines" summary that repeats commented-out lines and the
+continuation lines of multi-line values. This happens for any stack with a `.env`, whatever
+starts the action: this server, the UI or Dockhand's scheduler. This server masks it in what
+it returns (see [Env-File Dumps](#env-file-dumps-in-dockhands-log)) and makes `stack_action`
+require an acknowledgement, but it cannot stop Dockhand writing it. For a stack with
+secrets, run `docker compose` directly.
 
 **Stacks whose `env_file` lives outside `~/docker` cannot be deployed through Dockhand at
 all.** The Dockhand container has no mount for such paths — `/home/ted/.secrets` being the
@@ -260,9 +309,32 @@ output as sensitive regardless.
 `GET /api/stacks/{name}/env` and `/env/raw` return stack secrets with no masking and are not
 wrapped by any tool.
 
-`get_container_logs` carries the ordinary risk that logs contain secrets; no redaction can
-find a secret in a log line, since there is no key to match on. This is the same exposure as
-`docker logs`.
+## Env-File Dumps in Dockhand's Log
+
+`get_container_logs`, `get_stack_deploy_log` and `get_schedule_executions` mask what Dockhand
+prints when it parses a stack's `.env`, for **every** container, not only one named
+`dockhand`. The mask keys on the text, which a container's name cannot change.
+
+| Layer | What it catches |
+|---|---|
+| Block | Everything between `[Git] Raw content:` and `[Git] Total lines: N` becomes `[env file content masked by dockhand-mcp]`. This is what catches a multi-line value's continuation lines, which have no key to match on |
+| Fail closed, end missing | A block whose end marker was cut off by `tail` is masked to the end of the text |
+| Fail closed, start missing | An end marker with no start (the head was cut off) masks the `N` lines before it |
+| Fail closed, frame changed | An unexpected line between the header and `Raw content:` starts the mask early |
+| Skipped-lines summary | `[Git] Skipped lines (N): ...` is masked whole |
+| Env-shaped lines | Anything else shaped `KEY=`, `# KEY=`, `export KEY=` (dot and dash keys included) gets the value-shape redaction above. A quoted value that never closes is masked to the end |
+| Opaque lines | A line that is nothing but a long opaque token (a PEM body line, say) is masked by shape, for a `since`/`until` window that cuts off both markers |
+
+`masked_lines` in the response counts what was removed. A secret in free text, with no
+`KEY=` in front of it, has nothing to match on and is returned as-is. Treat log output as
+sensitive.
+
+`get_stack_compose` applies the value-shape redaction to values written inline in the
+compose file (`- KEY=value`, `KEY: value`, and each line of a `KEY: |` block) and reports
+`redacted_values`; a bare `${NAME}` reference stays readable. `validate_stack` findings get
+the same pass. URL credentials are stripped from the string fields of `list_schedules`,
+`get_schedule_executions` and `list_stack_deploys`. Userinfo is taken to end at the last
+`@`, so a URL whose path contains an `@` is over-redacted rather than under.
 
 ## Environment Variables
 
@@ -270,6 +342,7 @@ find a secret in a log line, since there is no key to match on. This is the same
 |----------|----------|---------|---------|
 | `DOCKHAND_ENDPOINT` | yes | — | Base URL, e.g. `http://localhost:7777` |
 | `DOCKHAND_API_TOKEN` | yes | — | Bearer token from Dockhand UI (Settings → API Tokens) |
+| `DOCKHAND_ALLOWED_ENVS` | no | — | Comma-separated environment ids this instance may reach. See [Pinning an instance](#pinning-an-instance-dockhand_allowed_envs) |
 | `DOCKHAND_DEFAULT_ENV` | **effectively yes** | — | Default Dockhand environment ID (e.g. `1`). Used by every list and action tool as the `?env=` query param when the caller doesn't pass one. Without it (and no explicit `environment_id`), those tools return a clear config error. See [Environments](#environments) |
 | `MCP_TRANSPORT` | no | `stdio` | `stdio` for local dev; `http` for the long-lived PM2 service. See [Deployment](#deployment-forge-pm2) |
 | `DOCKHAND_MCP_HTTP_HOST` | no | `127.0.0.1` | Bind host in `http` mode. Loopback-only — startup refuses a non-loopback host |
@@ -299,11 +372,12 @@ its OTel/InfluxDB/NATS telemetry actually flush and centralizes logs under `pm2 
 cd ~/repos/personal
 git clone <repo-url> dockhand-mcp
 
-# Install
+# Install (the package is under src/ since 0.8.0; re-run this after any pull that
+# moves files, because an editable install records paths)
 cd dockhand-mcp
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[influxdb,otel,nats]"
 
 # Secrets in ~/.secrets/forge.env (injected via --env-file, never in the repo):
 #   DOCKHAND_API_TOKEN   — Dockhand API token (UI: Settings → API Tokens)
@@ -352,9 +426,9 @@ The forge environment has `"id": 1`. Set `DOCKHAND_DEFAULT_ENV=1` in forge.env.
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-pytest
-pytest --cov=dockhand_mcp
+uv sync --frozen --extra dev     # exactly the committed uv.lock, as CI installs it
+uv run --frozen pytest --cov     # coverage floor is in pyproject.toml
+uv run --frozen ruff check src tests
 ```
 
 ## Observability
@@ -390,7 +464,26 @@ events flush on the long-lived HTTP process and are drained cleanly on shutdown.
 per-turn stdio subprocess the batch exporters were torn down before flushing, so telemetry never
 arrived — running as a PM2 HTTP service is what makes it observable.
 
+## Excluded Routes
+
+Not wrapped, deliberately, and guarded by a test that fails if a call to one appears:
+
+- `containers/{id}/exec`, `exec/run`, and every `files/*` route: a shell in, and writes to,
+  a container's filesystem;
+- `system/files`, which lists Dockhand's own filesystem;
+- `stacks/{name}/env`, `stacks/{name}/env/raw` and `git/stacks/{id}/env-files`, which
+  return env values with no masking;
+- Hawser tokens, backups and restore, secret providers, and registry credentials;
+- every schedule, auto-update, scheduled-action, report or tag **mutation**: the
+  corresponding tools here are read only;
+- the activity and deploy-history DELETEs, prune, and the Server-Sent Events streams.
+
+A second test pins the set of tools that make a POST or DELETE at all. A new one needs a
+HITL line in every scoped-mcp manifest that loads this server before it is deployed.
+
 ## Verified API Paths
 
 All endpoint paths were verified against the live Dockhand instance (v1.0.27) before implementation.
-Path discovery method: SvelteKit manifest extraction from the running container.
+Path discovery method: SvelteKit manifest extraction from the running container. The 0.8.0
+routes were written against the Dockhand 1.0.55 OpenAPI spec and checked against a live
+1.0.55 instance on 2026-10-25.
