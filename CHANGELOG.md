@@ -54,7 +54,9 @@ The package moved to `src/`, and an editable install records paths.
 - **An integer `environment_id` was rejected at the MCP layer.** It is now typed `str | int`
   on every tool. `True` is refused rather than read as env 1.
 - **The restart-polling contradiction** (#1239). The docstring was right and the tests were
-  wrong: restart answers directly on 1.0.55, and the fixtures now match.
+  wrong: restart answers directly on 1.0.55, and the fixtures now match. So do start and stop,
+  measured live, although the spec documents a `jobId` for them. A `jobId` is still polled if
+  one appears.
 
 ### Repo standard
 - `src/` layout and `uv.lock`. CI installs with `uv sync --frozen` and audits the lock with

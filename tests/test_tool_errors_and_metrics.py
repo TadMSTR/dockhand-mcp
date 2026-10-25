@@ -197,7 +197,7 @@ def slow_job(monkeypatch):
 @pytest.mark.asyncio
 async def test_stack_action_duration_includes_the_job_poll(mock_env, slow_job, collect_metrics):
     with respx.mock(base_url=ENDPOINT) as mock:
-        # start, not restart: start is a route that returns a jobId (1.0.55 spec).
+        # start, not restart: the spec documents a jobId on start, not on restart.
         mock.post("/api/stacks/searxng/start").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
         )

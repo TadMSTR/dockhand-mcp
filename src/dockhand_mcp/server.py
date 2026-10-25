@@ -1424,10 +1424,10 @@ async def stack_action(
     local. ``pull=True`` re-resolves every image and can recreate services you
     did not mean to touch (vikunja#671).
 
-    ``start`` and ``stop`` return a jobId, polled here to completion:
-    {jobId, success, output} or {jobId, success: false, error}. ``deploy`` and
-    ``restart`` answer directly with {success, output|error}, as measured on
-    1.0.55.
+    All four answer {success, output|error} directly, measured on 1.0.55 with
+    this client's ``Accept: application/json``. The spec documents a jobId for
+    ``start`` and ``stop``; if one comes back it is polled to completion and the
+    result is {jobId, success, output|error}.
 
     Args:
         stack_name: Stack name from list_stacks.

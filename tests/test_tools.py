@@ -125,8 +125,10 @@ async def test_stack_action_deploy_sends_body_and_env(mock_env):
 @pytest.mark.parametrize("action", ["start", "stop"])
 @pytest.mark.asyncio
 async def test_stack_action_start_stop_poll_the_job(mock_env, action):
-    """start and stop return {jobId} (1.0.55 spec, required), and the tool
-    surfaces the job's verdict rather than the opaque handle."""
+    """The 1.0.55 spec documents {jobId} (required) on start and stop. Live,
+    with Accept: application/json, both answered {success, output} directly
+    (2026-10-25), so this covers the poll path for when a jobId does come back:
+    the tool surfaces the job's verdict rather than the opaque handle."""
     with respx.mock(base_url=ENDPOINT) as mock:
         route = mock.post(f"/api/stacks/searxng/{action}").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)
@@ -254,8 +256,8 @@ async def test_stack_action_deploy_is_not_polled(mock_env):
 async def test_stack_action_surfaces_job_failure(mock_env):
     """A job that finishes with success=false is reported as a failure, not a
     false success — this is the silent-failure gap that hid the missing env."""
-    # stop, not restart: stop is one of the two actions that returns a jobId
-    # (1.0.55 spec, POST /api/stacks/{name}/stop: {jobId} required).
+    # stop, not restart: the spec documents a jobId on stop (not on restart),
+    # so this is the shape a polled failure would take.
     with respx.mock(base_url=ENDPOINT) as mock:
         mock.post("/api/stacks/searxng/stop").mock(
             return_value=httpx.Response(200, json=JOB_QUEUED)

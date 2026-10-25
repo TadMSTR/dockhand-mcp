@@ -135,13 +135,11 @@ and give the confined agent no route to the unpinned instance.
 
 ## Asynchronous Actions
 
-Only some Dockhand routes are asynchronous, and the split is not the intuitive one. Of the
-routes this server calls, only **`stack_action` with `start` or `stop`** returns a `jobId`
-(the 1.0.55 spec marks it required on both). `restart` and `deploy` are documented as
-Server-Sent Events streams, and with `Accept: application/json` they answer
-`{success, output|error}` directly; measured on 1.0.55.
-
-Those poll `GET /api/jobs/{jobId}` to completion and return the terminal result:
+The 1.0.55 spec documents a `jobId` on `stack_action`'s `start` and `stop`, and describes
+`restart` and `deploy` as Server-Sent Events streams. With this client's
+`Accept: application/json`, **all four answered `{success, output|error}` directly** when
+measured on a live 1.0.55 instance (2026-10-25). If a `jobId` does come back, it is polled
+on `GET /api/jobs/{jobId}` to completion and the terminal result is returned:
 
 ```json
 { "jobId": "…", "success": true,  "output": " Container searxng Started \n" }
@@ -150,8 +148,7 @@ Those poll `GET /api/jobs/{jobId}` to completion and return the terminal result:
 
 So a returned `success: false` is a real failure, not a queued job you have to chase down.
 
-Everything else answers directly and is **not** polled — including `stack_action("…",
-"deploy")`, `update_container`, and `check_updates`. `check_updates` in particular returns
+Nothing else is polled: `update_container` and `check_updates` answer directly too. `check_updates` in particular returns
 its final result rather than a job handle, because the route offers a `text/event-stream`
 feed *"or, with `Accept: application/json`, the final result as plain JSON"*, and this
 client sets that header on every request. Expect it to be slow: it contacts a registry per
