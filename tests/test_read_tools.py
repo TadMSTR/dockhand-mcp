@@ -210,7 +210,7 @@ async def test_inspect_container_never_calls_the_unmasked_inspect_route(mock_env
     [
         "ANTHROPIC_API_KEY=sk-ant-live-supersecret",
         "POSTGRES_PASSWORD=hunter2",
-        "AUTHENTIK_SECRET_KEY=abcdef123456",
+        "AUTHENTIK_SECRET_KEY=abcdef123456",  # gitleaks:allow (fixture, not a credential)
         "DOCKHAND_API_TOKEN=dh-live-token",
         "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI",
         "BACKREST_REPO_PASSWORD=repo-pass",
@@ -227,7 +227,7 @@ async def test_inspect_container_never_calls_the_unmasked_inspect_route(mock_env
         "DFLY_requirepass=27ae41e4649b934ca495991b7852b855",
         "RABBITMQ_DEFAULT_PASS=da39a3ee5e6b4b0d3255bfef95601890",
         "NEO4J_AUTH=neo4j/5e884898da28047151d0e56f8dc62927",
-        "REDIS_AUTH=6b86b273ff34fce19d6b804eff5a3f57",
+        "REDIS_AUTH=6b86b273ff34fce19d6b804eff5a3f57",  # gitleaks:allow (fixture, not a credential)
         "CREDS_IV=d4735e3a265e16eee03f59718b9b5d03",
     ],
 )
