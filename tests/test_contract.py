@@ -12,7 +12,7 @@ if the request had gone out first.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -680,7 +680,7 @@ async def test_check_updates_filters_to_rows_needing_attention(mock_env):
 
 
 async def test_get_pending_updates_marks_stale_rows(mock_env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = [
         {"containerName": "fresh", "checkedAt": (now - timedelta(hours=2)).isoformat()},
         {"containerName": "old", "checkedAt": "2026-10-01T00:00:00.000Z"},

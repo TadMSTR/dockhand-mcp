@@ -7,6 +7,8 @@ code happens to do. The repo has been burned once by a test that asserted the
 same wrong thing the code sent (vikunja#702).
 """
 
+from __future__ import annotations
+
 import httpx
 import pytest
 import respx

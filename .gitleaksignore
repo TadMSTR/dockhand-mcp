@@ -1,0 +1,9 @@
+# Fixture values in inspect_container's redaction tests, not credentials. Each
+# was checked against ~/.secrets and ~/docker on forge, 2026-10-25: no match.
+# Suppressed by fingerprint, not by path, so a real secret added to the same
+# file still fails the scan. History form (commit:file:rule:line) and working-
+# tree form (file:rule:line).
+fa8faec26bd94014f3576b36fede312143b0a2cc:tests/test_read_tools.py:generic-api-key:211
+fa8faec26bd94014f3576b36fede312143b0a2cc:tests/test_read_tools.py:generic-api-key:228
+tests/test_read_tools.py:generic-api-key:211
+tests/test_read_tools.py:generic-api-key:228

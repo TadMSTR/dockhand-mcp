@@ -14,6 +14,8 @@ ever exercised the happy path with a fully-configured environment:
   121-135 s for calls whose metric said ~0.1 s.
 """
 
+from __future__ import annotations
+
 import asyncio
 
 import httpx

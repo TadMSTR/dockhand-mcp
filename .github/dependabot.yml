@@ -1,7 +1,10 @@
 version: 2
 
 updates:
-  - package-ecosystem: pip
+  # uv, not pip: the committed uv.lock is what CI audits and tests, so it is
+  # what Dependabot has to move (repo standard F11). The uv ecosystem updates
+  # pyproject.toml and uv.lock together.
+  - package-ecosystem: uv
     directory: "/"
     schedule:
       interval: weekly
@@ -20,6 +23,21 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # Explicit and sized to this repo: the distinct `uses:` paths across
+    # .github/workflows/, codeql-action's subpaths counted once (6, 2026-10-25).
+    # At the default cap of 5 Dependabot silently holds the next bump back
+    # (vikunja#932, #937). Re-count when a workflow adds an action.
+    open-pull-requests-limit: 6
+    # codeql-action's init, analyze and upload-sarif must move to one SHA together
+    # or CodeQL ends `neutral` (vikunja#930, #936). The group is repeated for
+    # security updates because a group without `applies-to` covers version
+    # updates only.
+    groups:
+      codeql-action:
+        patterns: ["github/codeql-action*"]
+      codeql-action-security:
+        applies-to: security-updates
+        patterns: ["github/codeql-action*"]
     # Majors are NOT ignored here, unlike pip above. Both workflows pin actions
     # to commit SHAs, and Dependabot is the only thing that will ever move them —
     # ignoring majors would pin this repo to actions/checkout v4 indefinitely.

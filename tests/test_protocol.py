@@ -39,10 +39,16 @@ async def test_every_input_schema_matches_its_signature():
         fn = getattr(server, name)
         fn = getattr(fn, "fn", fn)
         params = inspect.signature(fn).parameters
-        schema = tool.inputSchema
+        schema = _schema(tool)
         assert set(schema.get("properties", {})) == set(params), name
         required = {p for p, v in params.items() if v.default is inspect.Parameter.empty}
         assert set(schema.get("required", [])) == required, name
+
+
+def _schema(tool) -> dict:
+    # fastmcp 4.1 renamed inputSchema to input_schema and deprecates the old
+    # name; 4.0.11, which production runs, has only the old one.
+    return getattr(tool, "input_schema", None) or tool.inputSchema
 
 
 def _accepts(schema: dict, json_type: str) -> bool:
@@ -54,10 +60,10 @@ def _accepts(schema: dict, json_type: str) -> bool:
 async def test_environment_id_accepts_an_integer_and_a_string_everywhere():
     async with Client(server.mcp) as client:
         tools = await client.list_tools()
-    with_env = [t for t in tools if "environment_id" in t.inputSchema.get("properties", {})]
+    with_env = [t for t in tools if "environment_id" in _schema(t).get("properties", {})]
     assert with_env, "no tool takes environment_id"
     for tool in with_env:
-        prop = tool.inputSchema["properties"]["environment_id"]
+        prop = _schema(tool)["properties"]["environment_id"]
         assert _accepts(prop, "integer"), tool.name
         assert _accepts(prop, "string"), tool.name
 

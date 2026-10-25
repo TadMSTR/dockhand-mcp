@@ -23,6 +23,8 @@ deliberately faked via ``sys.modules`` rather than imported: CI installs only
 it matters most.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import sys

@@ -20,9 +20,9 @@ import json
 import math
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 
@@ -48,9 +48,9 @@ class PinReport:
     """Outcome of one report read. ``state`` is ``ok`` or the reason it is not."""
 
     state: str  # ok | missing | unreadable | schema_mismatch | stale
-    reason: Optional[str] = None
-    generated: Optional[str] = None
-    age_hours: Optional[float] = None
+    reason: str | None = None
+    generated: str | None = None
+    age_hours: float | None = None
     by_name: dict[str, dict] = field(default_factory=dict)
     by_ref: dict[str, list[dict]] = field(default_factory=dict)
 
@@ -76,11 +76,11 @@ def max_age_hours() -> float:
     return value
 
 
-def _name(value: Any) -> Optional[str]:
+def _name(value: Any) -> str | None:
     return value.lstrip("/") if isinstance(value, str) and value else None
 
 
-def read_report(now: Optional[datetime] = None) -> PinReport:
+def read_report(now: datetime | None = None) -> PinReport:
     """Read and validate the report. Never raises.
 
     Three raise paths were found in review after the specific handlers were
@@ -90,14 +90,14 @@ def read_report(now: Optional[datetime] = None) -> PinReport:
     """
     try:
         return _read_report(now)
-    except Exception as e:  # noqa: BLE001 - fail closed, never fail the tool
+    except Exception as e:
         log.error("digest_pin_report_unexpected_error", error_type=type(e).__name__)
         return PinReport(
             "unreadable", reason=f"unexpected error reading report: {type(e).__name__}"
         )
 
 
-def _read_report(now: Optional[datetime]) -> PinReport:
+def _read_report(now: datetime | None) -> PinReport:
     path = report_path()
     try:
         if path.stat().st_size > MAX_REPORT_BYTES:
@@ -122,7 +122,9 @@ def _read_report(now: Optional[datetime]) -> PinReport:
     if schema != SUPPORTED_SCHEMA or isinstance(schema, bool):
         return PinReport(
             "schema_mismatch",
-            reason=f"report schema_version {repr(schema)[:40]}; this server reads {SUPPORTED_SCHEMA}",
+            reason=(
+                f"report schema_version {repr(schema)[:40]}; this server reads {SUPPORTED_SCHEMA}"
+            ),
         )
 
     generated = data.get("generated")
@@ -133,7 +135,7 @@ def _read_report(now: Optional[datetime]) -> PinReport:
     if ts is None or ts.tzinfo is None:
         return PinReport("unreadable", reason="report has no timezone-aware 'generated'")
 
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     age_s = (now - ts).total_seconds()
     if age_s < -_FUTURE_SKEW_S:
         return PinReport(
@@ -177,7 +179,7 @@ def is_pinned(ref: Any) -> bool:
     return isinstance(ref, str) and "@sha256:" in ref
 
 
-def _assessment(report: PinReport, status: str, detail: Optional[str]) -> dict:
+def _assessment(report: PinReport, status: str, detail: str | None) -> dict:
     return {
         "status": status,
         "detail": detail,
@@ -186,7 +188,7 @@ def _assessment(report: PinReport, status: str, detail: Optional[str]) -> dict:
     }
 
 
-def _from_row(report: PinReport, row: dict, how: Optional[str] = None) -> dict:
+def _from_row(report: PinReport, row: dict, how: str | None = None) -> dict:
     status = row.get("status")
     if not isinstance(status, str) or not status:
         return _assessment(report, NOT_ASSESSED, "report row has no status")

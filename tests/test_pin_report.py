@@ -21,7 +21,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -61,7 +61,7 @@ ALL_REPORT_STATUSES = [
 def _fresh(report: dict, age: timedelta = timedelta(hours=1)) -> dict:
     """The fixture with ``generated`` moved to ``age`` before the test's clock."""
     out = copy.deepcopy(report)
-    out["generated"] = (datetime.now(timezone.utc) - age).isoformat()
+    out["generated"] = (datetime.now(UTC) - age).isoformat()
     return out
 
 
@@ -167,7 +167,7 @@ async def test_dockhand_fields_are_passed_through_untouched(mock_env, monkeypatc
     assert result["updatesFound"] == 25
 
 
-@pytest.mark.parametrize("status", ALL_REPORT_STATUSES + ["pin-missing"])
+@pytest.mark.parametrize("status", [*ALL_REPORT_STATUSES, "pin-missing"])
 @pytest.mark.asyncio
 async def test_report_status_passes_through_verbatim(mock_env, monkeypatch, tmp_path, status):
     """All 10 schema-v1 statuses, hyphens intact, plus one this code has never

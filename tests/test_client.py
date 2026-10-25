@@ -3,6 +3,8 @@ Tests for DockhandClient — auth injection, error handling, env resolution,
 and async job polling.
 """
 
+from __future__ import annotations
+
 import httpx
 import pytest
 import respx

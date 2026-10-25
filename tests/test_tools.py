@@ -6,6 +6,8 @@ the previous suite mocked only the HTTP client and never checked what the tools
 actually sent.
 """
 
+from __future__ import annotations
+
 import json
 
 import httpx

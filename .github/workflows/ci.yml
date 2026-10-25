@@ -22,42 +22,48 @@ jobs:
       # SHA-pinned per the Baseline bar — a tag is mutable and release.yml
       # already pinned, so the two workflows previously contradicted each other.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
+      # uv from PyPI at a pinned version, rather than a setup action to pin and
+      # audit for the job of putting one binary on PATH.
+      - name: Install uv
+        run: python -m pip install uv==0.11.18
+
+      # --frozen: install exactly the committed uv.lock and fail if pyproject has
+      # drifted from it. The tested tree is then the locked tree (F5).
       - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]" ruff pip-audit
+        run: uv sync --frozen --extra dev --python "${{ matrix.python-version }}"
 
       - name: Lint (ruff)
-        run: ruff check src tests
+        run: uv run --frozen ruff check src tests
 
       - name: Format check (ruff)
-        run: ruff format --check .
+        run: uv run --frozen ruff format --check .
 
-      # `pip-audit .` resolves THIS project's dependencies rather than scanning
-      # the ambient environment, so the gate does not go red because a runner
-      # ships an old pip — verified by running it in a venv whose own pip
-      # carried 7 advisories and still getting exit 0.
-      #
-      # This gate and the pyproject floors are one unit: the gate without the
-      # floors lands red on 21 advisories, and the floors without the gate leave
-      # nothing to stop the next drift.
-      - name: Dependency audit (pip-audit)
-        run: pip-audit --strict .
-
-      # Floor is 85, against 88.7% actually achieved on this branch — measured in
-      # a venv installed with `.[dev]` only, i.e. exactly what CI installs,
-      # because the optional influxdb/nats/otel extras are absent here and a
-      # number taken from a fully-provisioned dev venv would not transfer.
-      # Deliberately a measured number with a small margin, not an aspirational one.
-      - name: Test (pytest + coverage)
+      # Two gates over the LOCK, not a fresh resolve (vikunja#633, #670): a
+      # resolve can land on a different tree from the one that ships. Runtime is
+      # what PM2 runs, including the influxdb/otel/nats extras production installs.
+      # Dev is everything CI itself executes. --disable-pip audits the pinned,
+      # hashed export as written instead of re-resolving it.
+      - name: Dependency audit (runtime, from uv.lock)
         run: |
-          pytest -q \
-            --cov=dockhand_mcp \
-            --cov-report=term-missing \
-            --cov-fail-under=85
+          uv export --frozen --no-emit-project --extra influxdb --extra otel --extra nats \
+            -o "$RUNNER_TEMP/runtime.txt"
+          uv run --frozen pip-audit --strict --disable-pip -r "$RUNNER_TEMP/runtime.txt"
+
+      - name: Dependency audit (dev, from uv.lock)
+        run: |
+          uv export --frozen --no-emit-project --extra dev -o "$RUNNER_TEMP/dev.txt"
+          uv run --frozen pip-audit --strict --disable-pip -r "$RUNNER_TEMP/dev.txt"
+
+      # The coverage floor lives in pyproject ([tool.coverage.report] fail_under),
+      # with the measured number and date beside it. No flag here, so CI and a
+      # local `pytest --cov` cannot disagree about it.
+      - name: Test (pytest + coverage)
+        run: uv run --frozen pytest -q --cov --cov-report=term-missing

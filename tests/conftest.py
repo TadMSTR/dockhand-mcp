@@ -6,6 +6,8 @@ asynchronously — returning ``{"jobId": ...}`` and exposing a terminal result v
 ``GET /api/jobs/{jobId}``.
 """
 
+from __future__ import annotations
+
 import pytest
 
 import dockhand_mcp.client as client_module

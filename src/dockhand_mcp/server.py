@@ -19,7 +19,7 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -699,7 +699,7 @@ def _mark_staleness(rows: Any, now: datetime | None = None) -> int:
     """
     if not isinstance(rows, list):
         return 0
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     stale = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -710,7 +710,7 @@ def _mark_staleness(rows: Any, now: datetime | None = None) -> int:
             try:
                 ts = datetime.fromisoformat(checked.replace("Z", "+00:00"))
                 if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
+                    ts = ts.replace(tzinfo=UTC)
                 age = round((now - ts).total_seconds() / 3600, 1)
             except ValueError:
                 age = None
