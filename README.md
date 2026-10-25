@@ -323,14 +323,18 @@ prints when it parses a stack's `.env`, for **every** container, not only one na
 | Fail closed, frame changed | An unexpected line between the header and `Raw content:` starts the mask early |
 | Skipped-lines summary | `[Git] Skipped lines (N): ...` is masked whole |
 | Env-shaped lines | Anything else shaped `KEY=`, `# KEY=`, `export KEY=` (dot and dash keys included) gets the value-shape redaction above. A quoted value that never closes is masked to the end |
+| Opaque lines | A line that is nothing but a long opaque token (a PEM body line, say) is masked by shape, for a `since`/`until` window that cuts off both markers |
 
 `masked_lines` in the response counts what was removed. A secret in free text, with no
 `KEY=` in front of it, has nothing to match on and is returned as-is. Treat log output as
 sensitive.
 
 `get_stack_compose` applies the value-shape redaction to values written inline in the
-compose file (`- KEY=value`, `KEY: value`) and reports `redacted_values`; a bare `${NAME}`
-reference stays readable.
+compose file (`- KEY=value`, `KEY: value`, and each line of a `KEY: |` block) and reports
+`redacted_values`; a bare `${NAME}` reference stays readable. `validate_stack` findings get
+the same pass. URL credentials are stripped from the string fields of `list_schedules`,
+`get_schedule_executions` and `list_stack_deploys`. Userinfo is taken to end at the last
+`@`, so a URL whose path contains an `@` is over-redacted rather than under.
 
 ## Environment Variables
 

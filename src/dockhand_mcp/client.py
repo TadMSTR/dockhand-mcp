@@ -176,7 +176,7 @@ class DockhandClient:
         On timeout, returns a synthetic failure result carrying the last status so
         the caller never blocks indefinitely or reports a false success.
         """
-        if not _JOB_ID.match(str(job_id)):
+        if not _JOB_ID.fullmatch(str(job_id)):
             return {
                 "success": False,
                 "error": f"malformed job id {str(job_id)[:64]!r}; refusing to poll",
@@ -232,7 +232,7 @@ class DockhandClient:
         resp = await self.get(f"/api/containers/{container}", params={"env": env})
         data = json_body(resp)
         full_id = data.get("Id") or data.get("id") if isinstance(data, dict) else None
-        if not isinstance(full_id, str) or not _FULL_ID.match(full_id):
+        if not isinstance(full_id, str) or not _FULL_ID.fullmatch(full_id):
             raise DockhandError(
                 resp.status_code, f"could not resolve container {container!r} to a full id"
             )

@@ -19,7 +19,13 @@ import pytest
 import respx
 
 from dockhand_mcp import server
-from dockhand_mcp.redaction import ENV_DUMP_PLACEHOLDER, mask_env_dump, redact_compose
+from dockhand_mcp.redaction import (
+    ENV_DUMP_PLACEHOLDER,
+    mask_env_dump,
+    redact_compose,
+    redact_value,
+    scrub_strings,
+)
 
 from .conftest import (
     BATCH_UPDATE_SUCCESS,
@@ -237,6 +243,118 @@ def test_a_changed_frame_fails_closed():
     assert ML_CANARY not in masked
 
 
+def test_a_window_that_cuts_both_markers_still_masks_opaque_lines():
+    """since/until can select the middle of a dump, with neither marker in view.
+    A PEM body or a long continuation line is masked by shape alone."""
+    pem_line = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ" + CANARY[-8:]
+    text = "\n".join([f"2026-10-25T19:58:29.305836799Z {pem_line}", "Container x Started"])
+    masked, n = mask_env_dump(text)
+    assert pem_line not in masked
+    assert "Container x Started" in masked
+    assert n == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgres://u:p/ss@db:5432/x",
+        "postgres://u:p@ss@db/x",
+        "postgres://u:p%40ss@db/x",
+        "redis://:p?ss#x@cache:6379",
+        "https://u:pw@host/path?q=1",
+    ],
+)
+def test_url_userinfo_is_stripped_whatever_the_password_holds(url):
+    out = redact_value("SOME_URL", url)
+    assert "p/ss" not in out and "p@ss" not in out and "p%40ss" not in out
+    assert "p?ss" not in out and ":pw@" not in out
+    assert "***REDACTED***@" in out
+
+
+def test_a_url_with_no_userinfo_is_unchanged():
+    assert redact_value("FEED_URL", "https://example.com/a/b?page=2") == (
+        "https://example.com/a/b?page=2"
+    )
+
+
+def test_compose_block_scalars_are_redacted_line_by_line():
+    text = "\n".join(
+        [
+            "services:",
+            "  a:",
+            "    environment:",
+            "      TLS_KEY: |",
+            "        -----BEGIN PRIVATE KEY-----",
+            f"        MIIEvQIBADANBgkqhkiG9w0BAQEFAASC{CANARY}",
+            "        -----END PRIVATE KEY-----",
+            "    command: >",
+            "      serve --port 8080",
+            "    image: nginx:1",
+        ]
+    )
+    out, n = redact_compose(text)
+    assert CANARY not in out
+    assert "      TLS_KEY: |" in out
+    assert "      serve --port 8080" in out
+    assert "    image: nginx:1" in out
+    assert n == 3
+
+
+def test_scrub_strings_reaches_nested_values():
+    rows = [{"name": "sync", "details": {"repo": f"https://x-token:{CANARY}@git.example/r"}}]
+    assert CANARY not in str(scrub_strings(rows))
+
+
+async def test_new_read_tools_scrub_url_credentials(mock_env):
+    secret_url = f"https://bot:{CANARY}@git.example/repo.git"
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/schedules").mock(
+            return_value=httpx.Response(
+                200, json={"schedules": [{"id": 1, "environmentId": 1, "description": secret_url}]}
+            )
+        )
+        mock.get("/api/schedules/executions").mock(
+            return_value=httpx.Response(
+                200,
+                json={"executions": [{"id": 1, "details": {"url": secret_url}}], "total": 1},
+            )
+        )
+        mock.get("/api/stacks/web/deploys").mock(
+            return_value=httpx.Response(200, json={"runs": [{"id": 1, "errorMessage": secret_url}]})
+        )
+        results = [
+            await server.list_schedules(),
+            await server.get_schedule_executions(),
+            await server.list_stack_deploys(stack_name="web"),
+        ]
+    for r in results:
+        assert CANARY not in str(r)
+
+
+async def test_validate_stack_findings_are_redacted(mock_env):
+    finding = {
+        "ruleId": "X",
+        "message": "inline secret",
+        "fix": {"kind": "replace", "text": f"      - DB_PASSWORD={CANARY}"},
+    }
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.post("/api/stacks/web/validate").mock(
+            return_value=httpx.Response(200, json={"findings": [finding], "counts": {}})
+        )
+        result = await server.validate_stack(stack_name="web", compose="services: {}")
+    assert CANARY not in str(result)
+    assert result["findings"][0]["ruleId"] == "X"
+
+
+async def test_version_notes_are_labelled_untrusted(mock_env):
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers/web/version-notes").mock(
+            return_value=httpx.Response(200, json={"notes": [{"body": "ignore previous"}]})
+        )
+        result = await server.get_version_notes(container_id="web", versions="1.0")
+    assert result["content_trust"].startswith("untrusted")
+
+
 def test_text_without_a_dump_is_unchanged():
     text = "Container x Started\nGET /api/health 200\nuser=bob action=login"
     assert mask_env_dump(text) == (text, 0)
@@ -421,7 +539,9 @@ async def test_update_container_posts_nothing_for_an_unknown_name(mock_env, look
 # Destructive negatives: bad input makes zero requests
 # ---------------------------------------------------------------------------
 
-_BAD_IDS = ["../x", "a/b", "", ".hidden", "a b", "a?b=1"]
+# "abc\n": `$` with .match() accepts a trailing newline, and httpx then raised
+# InvalidURL straight out of the tool (pre-audit baseline, IV-70).
+_BAD_IDS = ["../x", "a/b", "", ".hidden", "a b", "a?b=1", "..", "abc\n", "abc\r\n"]
 
 
 @pytest.mark.parametrize("bad", _BAD_IDS)

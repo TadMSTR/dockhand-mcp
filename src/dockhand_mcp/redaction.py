@@ -61,7 +61,24 @@ _OPAQUE_CREDENTIAL = re.compile(r"^[A-Za-z0-9+/=_.~-]{20,}$")
 
 # Credentials embedded in a URL value (postgres://user:pass@host) are invisible to
 # a key-name test — the key is usually a bland *_URL. Many live here.
-_URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@")
+# A URL token: scheme, then everything up to whitespace. Userinfo is taken to end
+# at the LAST "@" in the token, not the first, and may contain "/" or "@": a
+# password like "p/ss" or "p@ss" otherwise left the URL untouched or leaked its
+# tail (pre-audit baseline, SC-54). Over-redacting a path that happens to hold an
+# "@" is the accepted cost.
+_URL_TOKEN = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)(?P<rest>[^\s\"']*)")
+
+
+def _strip_userinfo(text: str) -> str:
+    def _one(m: re.Match[str]) -> str:
+        rest = m.group("rest")
+        at = rest.rfind("@")
+        if at < 0:
+            return m.group(0)
+        return f"{m.group('scheme')}{_REDACTED}{rest[at:]}"
+
+    return _URL_TOKEN.sub(_one, text)
+
 
 # A credential in a URL query string has no userinfo to strip and usually sits
 # under a bland key like FEED_URL, so neither the key test nor the userinfo test
@@ -125,8 +142,29 @@ def redact_value(key: str, value: str) -> str:
         return _REDACTED
 
     # Otherwise the value is not itself a secret, but may still carry one.
-    value = _URL_CREDENTIALS.sub(rf"\g<scheme>{_REDACTED}@", value)
-    return _URL_QUERY_SECRET.sub(rf"\g<sep>\g<name>={_REDACTED}", value)
+    return scrub_url_credentials(value)
+
+
+def scrub_url_credentials(text: str) -> str:
+    """Strip URL userinfo and secret-shaped query parameters from free text."""
+    text = _strip_userinfo(text)
+    return _URL_QUERY_SECRET.sub(rf"\g<sep>\g<name>={_REDACTED}", text)
+
+
+def scrub_strings(obj: Any) -> Any:
+    """``scrub_url_credentials`` over every string in a JSON-shaped value.
+
+    Defence in depth for Dockhand text the new read tools return without a
+    measured reason to trust it (schedule rows, execution details, deploy-run
+    details): a git-sync URL with a token in it is the expected case.
+    """
+    if isinstance(obj, str):
+        return scrub_url_credentials(obj)
+    if isinstance(obj, list):
+        return [scrub_strings(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: scrub_strings(v) for k, v in obj.items()}
+    return obj
 
 
 def _redact_env_entry(entry: str) -> str:
@@ -318,12 +356,27 @@ def mask_env_dump(text: str) -> tuple[str, int]:
             masked += 1
             continue
         new, open_quote = _mask_env_line(line)
+        if new == line:
+            new = _mask_opaque_line(line)
         if new != line:
             masked += 1
         out.append(new)
         if open_quote:
             state = "quoted"
     return "\n".join(out), masked
+
+
+# A line that is nothing but an opaque token: a PEM body line, or a multi-line
+# value's continuation when a since/until window cut off both block markers.
+_LOG_PREFIX = re.compile(r"^(?P<prefix>(?:\S+Z\s+)?(?:\S+Z\s+[A-Z]+\s+)?\s*)(?P<rest>.*)$")
+
+
+def _mask_opaque_line(line: str) -> str:
+    m = _LOG_PREFIX.match(line)
+    rest = m.group("rest").strip() if m else line.strip()
+    if _OPAQUE_CREDENTIAL.fullmatch(rest) and not _NUMERIC_VALUE.fullmatch(rest):
+        return f"{m.group('prefix') if m else ''}{_REDACTED}"
+    return line
 
 
 # A compose list item ("- KEY=value", optionally quoted) or a mapping entry
@@ -337,17 +390,35 @@ _COMPOSE_MAPPING = re.compile(
 )
 
 
+_BLOCK_SCALAR = re.compile(r"[|>][-+0-9]*")
+
+
 def redact_compose(text: str) -> tuple[str, int]:
     """Value-shape redaction over compose YAML text. Returns (text, values_redacted).
 
     Line-based by design: it does not parse YAML, so it cannot be confused by
-    anchors or merge keys, and a value it cannot classify is redacted.
+    anchors or merge keys. Values of ``- KEY=value`` items, ``KEY: value``
+    entries, and each line of a ``KEY: |`` / ``KEY: >`` block scalar go through
+    the value-shape test under their key. Anything else (comments, keys alone,
+    flow sequences) is passed through as written.
     """
     if not isinstance(text, str) or not text:
         return text, 0
     out: list[str] = []
     count = 0
+    block_key: str | None = None
+    block_indent = -1
     for line in text.split("\n"):
+        if block_key is not None:
+            indent = len(line) - len(line.lstrip(" "))
+            if not line.strip() or indent > block_indent:
+                body = line.strip()
+                if body and redact_value(block_key, body) != body:
+                    count += 1
+                    line = f"{line[:indent]}{_REDACTED}"
+                out.append(line)
+                continue
+            block_key = None
         m = _COMPOSE_LIST_ITEM.match(line)
         if m:
             value = m.group("value")
@@ -359,6 +430,11 @@ def redact_compose(text: str) -> tuple[str, int]:
             out.append(line)
             continue
         m = _COMPOSE_MAPPING.match(line)
+        if m and _BLOCK_SCALAR.fullmatch(m.group("value")):
+            # The indicator stays readable; the lines under it are the value.
+            block_key, block_indent = m.group("key"), len(m.group("prefix"))
+            out.append(line)
+            continue
         if m:
             q, inner = _unquote(m.group("value"))
             redacted = redact_value(m.group("key"), inner)

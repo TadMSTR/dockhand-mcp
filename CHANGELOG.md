@@ -34,7 +34,17 @@ The package moved to `src/`, and an editable install records paths.
   summary, which repeats comment lines and continuations in clear text and was found by this
   release's canary run, plus a line mask for anything else shaped like an env line.
   `masked_lines` reports what was removed.
-- **Compose value redaction** in `get_stack_compose` (`redacted_values`).
+- **Compose value redaction** in `get_stack_compose` (`redacted_values`), including each
+  line of a `KEY: |` block scalar. The same pass covers `validate_stack` findings, which can
+  quote compose lines.
+- **A standalone opaque-token line is masked** in every log the server returns. A
+  `since`/`until` window can cut off both block markers and leave a PEM body in view.
+- **URL credentials are stripped wherever the password contains `/`, `@`, `?` or `#`.**
+  Userinfo now ends at the last `@` in a URL token. Before, `postgres://u:p/ss@db` passed
+  through and `u:p@ss@db` leaked the password's tail. The same scrub runs on the string
+  fields of `list_schedules`, `get_schedule_executions` and `list_stack_deploys`.
+- `get_version_notes` labels its response `content_trust: untrusted`. The note bodies are
+  third-party text.
 - **`DOCKHAND_ALLOWED_ENVS`**, which pins an instance to a set of environments (#1027). It is a
   dockhand-mcp-side pin, because one API token reaches every environment.
 - **12 read tools:** `get_stack_stats`, `get_disk_usage`, `get_vulnerability_summary`,
