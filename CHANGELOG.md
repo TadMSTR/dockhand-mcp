@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- `ecosystem.config.js` defines a second PM2 app, `dockhand-mcp-fleet` (127.0.0.1:8510), pinned to
+  Dockhand env 2 with `DOCKHAND_ALLOWED_ENVS` and served with its own bearer
+  (`DOCKHAND_MCP_FLEET_BEARER`). The main app's environment is unchanged. Start one app at a time
+  with `--only`.
+
 ## [0.8.0] — 2026-10-25
 
 Hardening against Dockhand 1.0.55. **Four behaviour changes break existing callers.** Read
