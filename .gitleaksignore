@@ -1,5 +1,5 @@
 # Fixture values in inspect_container's redaction tests, not credentials. Each
-# was checked against ~/.secrets and ~/docker on forge, 2026-10-25: no match.
+# was checked against the deployment host's secret files, 2026-10-25: no match.
 #
 # These fingerprints cover the commit that introduced them (the weekly history
 # scan). The working tree carries an inline `gitleaks:allow` on the same two

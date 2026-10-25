@@ -189,7 +189,7 @@ def redact_container_env(payload: Any) -> Any:
 #
 # The block mask is the layer that matters: it removes everything between
 # "Raw content:" and "Total lines:", which is the only way to catch a quoted
-# value's continuation lines. The Alloy drop (host-forge/configs#25) is
+# value's continuation lines. A line-shaped log-pipeline drop is
 # line-shaped and cannot.
 
 ENV_DUMP_PLACEHOLDER = "[env file content masked by dockhand-mcp]"
@@ -209,7 +209,7 @@ _SKIPPED_PLACEHOLDER = "[skipped env lines masked by dockhand-mcp]"
 # means the format changed upstream, and the block starts early (fail closed).
 _DUMP_FRAME = re.compile(r"\[Git\] (?:-{8,}|Raw content length: \d+ chars)\s*$")
 
-# The env-line shape from host-forge/configs#25: an optional Docker timestamp,
+# The env-line shape the log-pipeline drop uses: an optional Docker timestamp,
 # an optional "<ts> LEVEL  " Dockhand prefix, then KEY=, "# KEY=" or
 # "export KEY=", where a key may carry dots and dashes. "- KEY=value" compose
 # list items are handled by redact_compose, not here.

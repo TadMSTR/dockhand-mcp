@@ -337,8 +337,8 @@ async def test_a_pinned_instance_filters_optional_env_routes(pinned):
 
 async def test_a_pinned_instance_drops_other_envs_schedules(pinned):
     schedules = [
-        {"id": 1, "environmentId": 1, "name": "forge"},
-        {"id": 2, "environmentId": 2, "name": "argus"},
+        {"id": 1, "environmentId": 1, "name": "local"},
+        {"id": 2, "environmentId": 2, "name": "remote"},
         {"id": 3, "environmentId": None, "name": "system"},
     ]
     with respx.mock(base_url=ENDPOINT) as mock:
@@ -346,7 +346,7 @@ async def test_a_pinned_instance_drops_other_envs_schedules(pinned):
             return_value=httpx.Response(200, json={"schedules": schedules})
         )
         result = await server.list_schedules()
-    assert [s["name"] for s in result["schedules"]] == ["argus"]
+    assert [s["name"] for s in result["schedules"]] == ["remote"]
 
 
 async def test_a_deploy_log_from_another_env_is_refused(pinned):

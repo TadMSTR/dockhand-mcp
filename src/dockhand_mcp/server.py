@@ -1091,7 +1091,7 @@ async def get_version_notes(
 
 def _pinned_rows(rows: list, allowed: frozenset[int] | None) -> list:
     """Drop rows from other environments on a pinned instance. A row with no
-    environment (a Dockhand system schedule) is dropped too: it is not argus's."""
+    environment (a Dockhand system schedule) is dropped too: it belongs to no pinned env."""
     if allowed is None:
         return rows
     return [r for r in rows if isinstance(r, dict) and r.get("environmentId") in allowed]
