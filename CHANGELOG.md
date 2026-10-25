@@ -2,6 +2,76 @@
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-25
+
+Hardening against Dockhand 1.0.55. **Four behaviour changes break existing callers.** Read
+them before deploying. **Deploying needs a reinstall (`pip install -e .`), not a restart.**
+The package moved to `src/`, and an editable install records paths.
+
+### Changed (behaviour)
+- **`stack_action` requires `acknowledge_env_log=true` on every action.** Without it, the
+  call is refused before any request is made. Dockhand prints the stack's whole `.env` to its
+  log on start, stop, restart and deploy (measured on 1.0.55), so the flag makes that choice
+  explicit and visible in the HITL prompt. The refusal names `docker compose` as the
+  alternative.
+- **`stack_action(deploy)` defaults to `pull=False`** (was `True`). That is a plain
+  `compose up -d`, which recreates only the services that changed.
+- **`list_stacks` is compact by default.** For 34 stacks it returned 179,542 characters, which
+  is more than a tool result can hold. Measured live, 35 stacks now come to 17,288. Pass
+  `detail=true` or `names=[...]` for full rows.
+- **`check_updates` returns only rows needing attention by default.** These are rows with an
+  update, an error, or a pin that is not `current`. `attention_summary` counts the whole set.
+  Pass `include_all=true` for every row. Measured live: 22,247 characters for 114 containers,
+  40 of them needing attention, where the full set was about 55k.
+
+### Added
+- **`update_container` accepts a name** or a short id. It is resolved to the full id before
+  the POST, so a name no longer fails after its HITL approval has been spent.
+- **Env-dump masking (audit F-02)** in `get_container_logs`, which previously returned the dump
+  raw. It applies to every container. It is a block mask over the
+  `Raw content:` … `Total lines:` frame, so multi-line values are covered. It fails closed when
+  `tail` cuts either end and when the frame changes. It also masks the `[Git] Skipped lines`
+  summary, which repeats comment lines and continuations in clear text and was found by this
+  release's canary run, plus a line mask for anything else shaped like an env line.
+  `masked_lines` reports what was removed.
+- **Compose value redaction** in `get_stack_compose` (`redacted_values`).
+- **`DOCKHAND_ALLOWED_ENVS`**, which pins an instance to a set of environments (#1027). It is a
+  dockhand-mcp-side pin, because one API token reaches every environment.
+- **12 read tools:** `get_stack_stats`, `get_disk_usage`, `get_vulnerability_summary`,
+  `list_stack_deploys`, `get_stack_deploy_log`, `validate_stack`, `get_version_notes`,
+  `list_schedules`, `get_schedule_executions`, `get_activity_stats`, `get_scheduled_actions`
+  and `get_auto_update_policy`. `validate_stack` needs no acknowledgement: measured on 1.0.55,
+  it prints no env content.
+- `get_activity` filters (container, actions, dates, environment).
+- `scan_image` takes `environment_id`.
+- `get_pending_updates` gives each row `checked_age_hours` and `stale`, which marks rows over
+  7 days old.
+
+### Fixed
+- **Transport and non-JSON errors escaped every tool** (#1239). A timeout, a refused
+  connection or an HTML 200 raised out of the tool, and nothing logged it. All of them now
+  return `{"error": ...}` with status 0.
+- **An integer `environment_id` was rejected at the MCP layer.** It is now typed `str | int`
+  on every tool. `True` is refused rather than read as env 1.
+- **The restart-polling contradiction** (#1239). The docstring was right and the tests were
+  wrong: restart answers directly on 1.0.55, and the fixtures now match.
+
+### Repo standard
+- `src/` layout and `uv.lock`. CI installs with `uv sync --frozen` and audits the lock with
+  separate runtime and dev gates. Dependabot moved from `pip` to `uv`.
+- Added a coverage floor of 90 in pyproject (94% measured), the full ruff rule set, gitleaks
+  (pinned binary; tree on every PR, full history weekly), CodeQL (python + actions), OSSF
+  Scorecard and CODEOWNERS.
+- `release.yml` is read-only at the top level.
+- The Dependabot github-actions config gets an explicit limit and a codeql-action group.
+- New tests:
+  - a protocol layer through `fastmcp.Client`: the schemas, integer env, and 401 on a wrong
+    bearer;
+  - every tool against three transport failures;
+  - zero-request assertions for the guard, the pin and bad input;
+  - a pinned set of mutating tools.
+  The suite went from 216 tests to 491.
+
 ## [0.7.0] — 2026-10-07
 
 FastMCP 4. No application code changed, and the tool surface is identical. **Deploying it
