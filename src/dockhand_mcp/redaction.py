@@ -196,7 +196,15 @@ ENV_DUMP_PLACEHOLDER = "[env file content masked by dockhand-mcp]"
 
 _DUMP_HEADER = re.compile(r"PARSE ENV FILE CONTENT")
 _DUMP_START = re.compile(r"\bRaw content:\s*$")
-_DUMP_END = re.compile(r"\[Git\] Total lines: \d+\s*$")
+_DUMP_END = re.compile(r"\[Git\] Total lines: (?P<n>\d+)\s*$")
+# After the block, parseEnvFileContent prints a one-line summary of the lines it
+# skipped, *with their content*: "Skipped lines (3): Line 2: # KEY=value...;
+# Line 5 (no =): <continuation>". That is a commented-out line (cut at some
+# length) and every continuation line of a multi-line value, in clear, outside
+# the block. Found by this build's canary, 2026-10-25; the Alloy drop misses it.
+_SKIPPED_LINES = re.compile(r"(?P<head>\[Git\] Skipped lines \(\d+\):).*$")
+_SKIPPED_PLACEHOLDER = "[skipped env lines masked by dockhand-mcp]"
+
 # Frame lines allowed between the header and "Raw content:". Anything else there
 # means the format changed upstream, and the block starts early (fail closed).
 _DUMP_FRAME = re.compile(r"\[Git\] (?:-{8,}|Raw content length: \d+ chars)\s*$")
@@ -246,9 +254,10 @@ def _mask_env_line(line: str) -> tuple[str, str]:
 def mask_env_dump(text: str) -> tuple[str, int]:
     """Mask Dockhand env-file dumps, and env-shaped lines, in log text.
 
-    Returns ``(masked_text, lines_masked)``. Fails closed: a block whose end
-    marker is missing (a truncated tail) is masked to the end of the text, and
-    so is a quoted multi-line value that never closes.
+    Returns ``(masked_text, lines_masked)``. Fails closed both ways a ``tail``
+    can cut a block: with the end marker missing, the block is masked to the end
+    of the text; with the start missing, the N lines before ``Total lines: N``
+    are masked. A quoted multi-line value that never closes is masked to the end.
     """
     if not isinstance(text, str) or not text:
         return text, 0
@@ -256,10 +265,26 @@ def mask_env_dump(text: str) -> tuple[str, int]:
     masked = 0
     state = "normal"  # normal | header | block | quoted
     open_quote = ""
+    floor = 0  # out[:floor] is already settled; an orphan end never reaches past it
     for line in text.split("\n"):
+        end = _DUMP_END.search(line)
+        if end and state in ("normal", "quoted"):
+            # An end marker with no start: the head of the block was cut off,
+            # e.g. by Dockhand's own ``tail``. The N lines before it are file
+            # content, including any continuation line no other test can see.
+            n = int(end.group("n"))
+            cut = max(floor, len(out) - n)
+            masked += len(out) - cut
+            del out[cut:]
+            out.append(ENV_DUMP_PLACEHOLDER)
+            out.append(line)
+            floor = len(out)
+            state = "normal"
+            continue
         if state == "block":
-            if _DUMP_END.search(line):
+            if end:
                 out.append(line)
+                floor = len(out)
                 state = "normal"
             else:
                 masked += 1
@@ -286,6 +311,11 @@ def mask_env_dump(text: str) -> tuple[str, int]:
         if _DUMP_HEADER.search(line):
             out.append(line)
             state = "header"
+            continue
+        skipped = _SKIPPED_LINES.search(line)
+        if skipped:
+            out.append(f"{line[: skipped.start()]}{skipped.group('head')} {_SKIPPED_PLACEHOLDER}")
+            masked += 1
             continue
         new, open_quote = _mask_env_line(line)
         if new != line:

@@ -803,6 +803,530 @@ async def get_host_info(environment_id: str | int | None = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Read tools — Dockhand 1.0.55 surface (dockhand-2026-10 p2)
+# ---------------------------------------------------------------------------
+#
+# Deliberately NOT wrapped, and test_read_tools guards it: containers/{id}/exec,
+# exec/run and every files/* route (audit F-05); system/files; stacks/{name}/env
+# and /env/raw; git/stacks/{id}/env-files; Hawser tokens; backups and restore;
+# secret providers; registry credentials; every schedule, auto-update,
+# scheduled-action, report or tag mutation; the activity and deploys DELETEs;
+# prune; and the SSE streams.
+
+_VERSIONS = re.compile(r"^[A-Za-z0-9._+-]{1,64}(?:,[A-Za-z0-9._+-]{1,64}){0,19}$")
+
+
+async def _read(tool: str, path: str, params: dict[str, Any] | None = None) -> tuple[Any, float]:
+    """GET ``path`` and decode it; the shared body of the small read tools."""
+    client = get_client()
+    resp, duration = await _timed_get(client, path, params=params)
+    return json_body(resp), duration
+
+
+async def _done(tool: str, duration: float, result: dict, **fields: Any) -> dict:
+    # A None field value is not a valid InfluxDB field; drop it rather than the point.
+    fields = {k: v for k, v in fields.items() if v is not None}
+    log.info(tool, duration_s=round(duration, 3), **fields)
+    await emit_metric("dockhand_tool", {"tool": tool}, {"duration_s": duration, **fields})
+    return result
+
+
+@mcp.tool
+async def get_stack_stats(environment_id: str | int | None = None) -> dict:
+    """Get a CPU, memory, network and block-IO snapshot per compose stack.
+
+    One sample, not a stream. Memory and IO are bytes; ``cpuPercent`` is a
+    percentage of one core.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    try:
+        env = get_client().resolve_env(environment_id)
+        data, duration = await _read("get_stack_stats", "/api/stack-stats", {"env": env})
+        stacks = data if isinstance(data, list) else []
+        return await _done(
+            "get_stack_stats",
+            duration,
+            {"stacks": stacks, "total": len(stacks)},
+            total=len(stacks),
+        )
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_stack_stats", e)
+
+
+def _usage_totals(usage: Any) -> dict | None:
+    if not isinstance(usage, dict):
+        return None
+    return {k: usage.get(k) for k in ("TotalCount", "ActiveCount", "TotalSize", "Reclaimable")}
+
+
+def _largest(items: Any, size_of: Any, label_of: Any, n: int = 10) -> list[dict]:
+    rows = [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+    rows.sort(key=lambda i: size_of(i) or 0, reverse=True)
+    return [{"name": label_of(i), "size": size_of(i)} for i in rows[:n]]
+
+
+@mcp.tool
+async def get_disk_usage(environment_id: str | int | None = None) -> dict:
+    """Get Docker disk usage (``docker system df``) as totals and the largest items.
+
+    Returns per-category totals (images, containers, volumes, build cache:
+    count, active, size, reclaimable, in bytes), the total layer size, and the
+    ten largest images and volumes. The raw Dockhand response is about 2 MB on
+    forge, so it is never returned whole. ``diskUsage`` is null when Dockhand
+    has collection disabled, or it timed out.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    try:
+        env = get_client().resolve_env(environment_id)
+        data, duration = await _read("get_disk_usage", "/api/system/disk", {"env": env})
+        usage = data.get("diskUsage") if isinstance(data, dict) else None
+        if not isinstance(usage, dict):
+            return await _done("get_disk_usage", duration, {"diskUsage": None})
+        result = {
+            "layers_size": usage.get("LayersSize"),
+            "images": _usage_totals(usage.get("ImageUsage")),
+            "containers": _usage_totals(usage.get("ContainerUsage")),
+            "volumes": _usage_totals(usage.get("VolumeUsage")),
+            "build_cache": _usage_totals(usage.get("BuildCacheUsage")),
+            "largest_images": _largest(
+                usage.get("Images"),
+                lambda i: i.get("Size"),
+                lambda i: (i.get("RepoTags") or [None])[0] or str(i.get("Id", ""))[:19],
+            ),
+            "largest_volumes": _largest(
+                usage.get("Volumes"),
+                lambda v: (v.get("UsageData") or {}).get("Size"),
+                lambda v: v.get("Name"),
+            ),
+        }
+        return await _done("get_disk_usage", duration, result)
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_disk_usage", e)
+
+
+@mcp.tool
+async def get_vulnerability_summary(
+    environment_id: str | int | None = None,
+    severity: str | None = None,
+    image: str | None = None,
+    container: str | None = None,
+    stack: str | None = None,
+    query: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
+    """Get the vulnerability totals for an environment and one page of findings.
+
+    ``summary`` comes from ``/api/vulnerabilities/count`` (totals by severity,
+    images scanned, and the distinct image/container/stack values you can
+    filter on). ``findings`` is one filtered page from ``/api/vulnerabilities``.
+    Both read Dockhand's stored scan results; they do not scan. Use scan_image
+    to scan.
+
+    Args:
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+        severity: Only this severity, e.g. 'critical'.
+        image: Only findings in this image.
+        container: Only findings in this container.
+        stack: Only findings in this stack.
+        query: Free-text match, e.g. a CVE id or package name.
+        limit: Page size (default 20, clamped to 1-100).
+        offset: Page offset.
+    """
+    try:
+        env = get_client().resolve_env(environment_id)
+        summary, d1 = await _read(
+            "get_vulnerability_summary", "/api/vulnerabilities/count", {"env": env}
+        )
+        params: dict[str, Any] = {
+            "env": env,
+            "limit": max(1, min(int(limit), 100)),
+            "offset": max(0, int(offset)),
+        }
+        for name, value in (
+            ("severity", severity),
+            ("image", image),
+            ("container", container),
+            ("stack", stack),
+            ("q", query),
+        ):
+            if value:
+                params[name] = value
+        page, d2 = await _read("get_vulnerability_summary", "/api/vulnerabilities", params)
+        page = page if isinstance(page, dict) else {}
+        findings = page.get("findings") if isinstance(page.get("findings"), list) else []
+        result = {"summary": summary, "findings": findings, "total": page.get("total")}
+        return await _done("get_vulnerability_summary", d1 + d2, result, returned=len(findings))
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_vulnerability_summary", e)
+
+
+@mcp.tool
+async def list_stack_deploys(
+    stack_name: str, environment_id: str | int | None = None, limit: int = 20
+) -> dict:
+    """List a stack's recorded deploy runs, newest first: when, who, how long,
+    the options used and a summary of what changed. No log text; use
+    get_stack_deploy_log with a run id for that.
+
+    Args:
+        stack_name: Stack name from list_stacks.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+        limit: Runs to return (default 20, clamped to 1-100).
+    """
+    if not _SAFE_ID.match(stack_name):
+        return {"error": f"Invalid stack_name: {stack_name!r}"}
+    try:
+        env = get_client().resolve_env(environment_id)
+        data, duration = await _read(
+            "list_stack_deploys", f"/api/stacks/{stack_name}/deploys", {"env": env}
+        )
+        runs = data.get("runs") if isinstance(data, dict) else data
+        runs = [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else []
+        n = max(1, min(int(limit), 100))
+        return await _done(
+            "list_stack_deploys",
+            duration,
+            {"runs": runs[:n], "total": len(runs)},
+            stack=stack_name,
+            total=len(runs),
+        )
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("list_stack_deploys", e)
+
+
+@mcp.tool
+async def get_stack_deploy_log(
+    stack_name: str,
+    run_id: int,
+    environment_id: str | int | None = None,
+    tail: int = 200,
+) -> dict:
+    """Get one deploy run's log text (the compose output), with env dumps masked.
+
+    The run's own environment is checked against ``environment_id`` before the
+    log is read, because the log route takes no environment.
+
+    p1 measured no env content in deploy logs (0 of 2 canary runs); the same
+    mask as get_container_logs is applied anyway, and ``masked_lines`` counts it.
+
+    Args:
+        stack_name: Stack name from list_stacks.
+        run_id: Run id from list_stack_deploys.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+        tail: Lines from the end (default 200, max 2000), counted after masking.
+    """
+    if not _SAFE_ID.match(stack_name):
+        return {"error": f"Invalid stack_name: {stack_name!r}"}
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 0:
+        return {"error": f"Invalid run_id: {run_id!r}"}
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        meta, d1 = await _read("get_stack_deploy_log", f"/api/stacks/{stack_name}/deploys/{run_id}")
+        run_env = meta.get("environmentId") if isinstance(meta, dict) else None
+        if run_env != env:
+            return {
+                "error": (
+                    f"Deploy run {run_id} of {stack_name!r} belongs to environment "
+                    f"{run_env!r}, not {env}."
+                )
+            }
+        resp, d2 = await _timed_get(client, f"/api/stacks/{stack_name}/deploys/{run_id}/log")
+        # Mask the whole text first, then cut: cutting first could leave content
+        # lines whose block start is gone.
+        text, masked = mask_env_dump(resp.text)
+        lines = text.split("\n")
+        n = max(1, min(int(tail), 2000))
+        result = {
+            "runId": run_id,
+            "status": meta.get("status"),
+            "log": "\n".join(lines[-n:]),
+            "total_lines": len(lines),
+            "masked_lines": masked,
+        }
+        return await _done(
+            "get_stack_deploy_log", d1 + d2, result, stack=stack_name, masked_lines=masked
+        )
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_stack_deploy_log", e)
+
+
+@mcp.tool
+async def get_version_notes(
+    container_id: str, versions: str, environment_id: str | int | None = None
+) -> dict:
+    """Get upstream release notes for the versions an update would move through.
+
+    Use before approving an update. Dockhand resolves the notes from GitHub
+    releases; ``rateLimited`` says when GitHub refused.
+
+    Args:
+        container_id: Container name or ID from list_containers.
+        versions: Comma-separated version tags, target plus the ones skipped,
+            e.g. '1.4.2,1.4.1'.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    if not _SAFE_ID.match(container_id):
+        return {"error": f"Invalid container_id: {container_id!r}"}
+    if not _VERSIONS.match(versions):
+        return {"error": f"Invalid versions: {versions!r}"}
+    try:
+        env = get_client().resolve_env(environment_id)
+        data, duration = await _read(
+            "get_version_notes",
+            f"/api/containers/{container_id}/version-notes",
+            {"env": env, "versions": versions},
+        )
+        return await _done(
+            "get_version_notes", duration, data if isinstance(data, dict) else {"notes": data}
+        )
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_version_notes", e)
+
+
+def _pinned_rows(rows: list, allowed: frozenset[int] | None) -> list:
+    """Drop rows from other environments on a pinned instance. A row with no
+    environment (a Dockhand system schedule) is dropped too: it is not argus's."""
+    if allowed is None:
+        return rows
+    return [r for r in rows if isinstance(r, dict) and r.get("environmentId") in allowed]
+
+
+@mcp.tool
+async def list_schedules(environment_id: str | int | None = None) -> dict:
+    """List Dockhand's schedules: auto-updates, scheduled start/stop, git syncs,
+    image prune, backups and system jobs, each with its cron, next run and
+    enabled state.
+
+    Args:
+        environment_id: Only this environment's schedules. Unset means all,
+            unless this instance is pinned with DOCKHAND_ALLOWED_ENVS.
+    """
+    try:
+        client = get_client()
+        env = client.env_filter(environment_id)
+        data, duration = await _read("list_schedules", "/api/schedules")
+        rows = data.get("schedules") if isinstance(data, dict) else data
+        rows = rows if isinstance(rows, list) else []
+        rows = _pinned_rows(rows, client.allowed_envs)
+        if env is not None:
+            rows = [r for r in rows if isinstance(r, dict) and r.get("environmentId") == env]
+        for r in rows:
+            # recentExecutions duplicates get_schedule_executions and can carry logs.
+            if isinstance(r, dict):
+                r.pop("recentExecutions", None)
+        return await _done(
+            "list_schedules", duration, {"schedules": rows, "total": len(rows)}, total=len(rows)
+        )
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("list_schedules", e)
+
+
+@mcp.tool
+async def get_schedule_executions(
+    environment_id: str | int | None = None,
+    schedule_type: str | None = None,
+    schedule_id: int | None = None,
+    status: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
+    """List schedule run history, newest first: what ran, when, how it ended.
+
+    Execution ``logs`` are masked like get_container_logs; ``masked_lines``
+    counts what was removed.
+
+    Args:
+        environment_id: Only this environment. Unset means all, unless this
+            instance is pinned with DOCKHAND_ALLOWED_ENVS.
+        schedule_type: e.g. 'container_update', 'git_stack_sync'.
+        schedule_id: One schedule, by id from list_schedules.
+        status: queued, running, success, warning, failed or skipped.
+        from_date: ISO date lower bound.
+        to_date: ISO date upper bound.
+        limit: Page size (default 20, clamped to 1-100).
+        offset: Page offset.
+    """
+    try:
+        client = get_client()
+        params: dict[str, Any] = {
+            "limit": max(1, min(int(limit), 100)),
+            "offset": max(0, int(offset)),
+        }
+        env = client.env_filter(environment_id)
+        if env is not None:
+            params["environmentId"] = env
+        for name, value in (
+            ("scheduleType", schedule_type),
+            ("scheduleId", schedule_id),
+            ("status", status),
+            ("fromDate", from_date),
+            ("toDate", to_date),
+        ):
+            if value not in (None, ""):
+                params[name] = value
+        data, duration = await _read("get_schedule_executions", "/api/schedules/executions", params)
+        data = data if isinstance(data, dict) else {"executions": data}
+        rows = data.get("executions") if isinstance(data.get("executions"), list) else []
+        rows = _pinned_rows(rows, client.allowed_envs)
+        masked_total = 0
+        for r in rows:
+            if isinstance(r, dict) and isinstance(r.get("logs"), str):
+                r["logs"], masked = mask_env_dump(r["logs"])
+                masked_total += masked
+        data["executions"] = rows
+        data["masked_lines"] = masked_total
+        return await _done(
+            "get_schedule_executions",
+            duration,
+            data,
+            returned=len(rows),
+            masked_lines=masked_total,
+        )
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_schedule_executions", e)
+
+
+@mcp.tool
+async def get_activity_stats(environment_id: str | int | None = None) -> dict:
+    """Get container event totals: all-time, today, and counts by action.
+
+    A high ``die`` or ``restart`` count against ``start`` points at a restart
+    loop; follow up with get_activity(actions='die,restart').
+
+    Args:
+        environment_id: Only this environment. Unset means all, unless this
+            instance is pinned with DOCKHAND_ALLOWED_ENVS.
+    """
+    try:
+        env = get_client().env_filter(environment_id)
+        data, duration = await _read(
+            "get_activity_stats",
+            "/api/activity/stats",
+            # snake_case on this one route, per the spec.
+            {"environment_id": env} if env is not None else None,
+        )
+        return await _done(
+            "get_activity_stats", duration, data if isinstance(data, dict) else {"stats": data}
+        )
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_activity_stats", e)
+
+
+@mcp.tool
+async def get_scheduled_actions(
+    container_name: str, environment_id: str | int | None = None
+) -> dict:
+    """Get a container's scheduled start and stop times, and where they come from
+    (its ``dockhand.start.at`` / ``dockhand.stop.at`` labels, or the UI). Read
+    only; this server does not set schedules.
+
+    Args:
+        container_name: Container name from list_containers.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    if not _SAFE_ID.match(container_name):
+        return {"error": f"Invalid container_name: {container_name!r}"}
+    try:
+        env = get_client().resolve_env(environment_id)
+        data, duration = await _read(
+            "get_scheduled_actions", f"/api/scheduled-actions/{container_name}", {"env": env}
+        )
+        return await _done("get_scheduled_actions", duration, data, container=container_name)
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_scheduled_actions", e)
+
+
+@mcp.tool
+async def get_auto_update_policy(
+    container_name: str, environment_id: str | int | None = None
+) -> dict:
+    """Get a container's auto-update setting: enabled, schedule, cron, and the
+    vulnerability criteria that block an update. Dockhand returns its defaults
+    when nothing is stored. Read only; this server does not change it.
+
+    Args:
+        container_name: Container name from list_containers.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    if not _SAFE_ID.match(container_name):
+        return {"error": f"Invalid container_name: {container_name!r}"}
+    try:
+        env = get_client().resolve_env(environment_id)
+        data, duration = await _read(
+            "get_auto_update_policy", f"/api/auto-update/{container_name}", {"env": env}
+        )
+        return await _done("get_auto_update_policy", duration, data, container=container_name)
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("get_auto_update_policy", e)
+
+
+@mcp.tool
+async def validate_stack(
+    stack_name: str, compose: str | None = None, environment_id: str | int | None = None
+) -> dict:
+    """Lint a stack's compose file with Dockhand's preflight validator.
+
+    Returns ``findings`` (rule id, service, message, hint, line, severity, and a
+    suggested fix where there is one) and ``counts`` by severity. Changes
+    nothing.
+
+    With no ``compose``, the stack's current file is fetched and validated as
+    an existing stack, so a container_name it already owns is not reported as a
+    collision. Pass ``compose`` to check an edit before you deploy it.
+
+    Measured 2026-10-25 on Dockhand 1.0.55, on a canary stack with a ``.env``:
+    validate printed no env content (0 dumps, with and without ``existing``), so
+    it needs no acknowledge_env_log.
+
+    Args:
+        stack_name: Stack name from list_stacks.
+        compose: Compose YAML to validate instead of the stored file.
+        environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+    """
+    if not _SAFE_ID.match(stack_name):
+        return {"error": f"Invalid stack_name: {stack_name!r}"}
+    try:
+        client = get_client()
+        env = client.resolve_env(environment_id)
+        existing = compose is None
+        d1 = 0.0
+        if compose is None:
+            stored, d1 = await _read(
+                "validate_stack", f"/api/stacks/{stack_name}/compose", {"env": env}
+            )
+            compose = stored.get("content") if isinstance(stored, dict) else None
+            if not isinstance(compose, str) or not compose:
+                return {"error": f"No compose content found for stack {stack_name!r}"}
+        # Only compose and existing. envVars and providerKeys are not sent: they
+        # would carry env values into Dockhand, which is the thing p2 exists to stop.
+        resp, d2 = await _timed_post(
+            client,
+            f"/api/stacks/{stack_name}/validate",
+            params={"env": env},
+            json={"compose": compose, "existing": existing},
+        )
+        data = json_body(resp)
+        counts = data.get("counts") if isinstance(data, dict) else None
+        return await _done(
+            "validate_stack",
+            d1 + d2,
+            data if isinstance(data, dict) else {"findings": data},
+            stack=stack_name,
+            errors=(counts or {}).get("error"),
+        )
+    except (DockhandError, DockhandConfigError) as e:
+        return _tool_error("validate_stack", e)
+
+
+# ---------------------------------------------------------------------------
 # Action tools
 # ---------------------------------------------------------------------------
 

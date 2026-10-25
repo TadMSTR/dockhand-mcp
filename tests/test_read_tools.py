@@ -502,6 +502,23 @@ def _route_literals() -> set[str]:
         "/inspect",
         # Return a stack's environment variables with no masking rationale.
         "/env",
+        # git/stacks/{id}/env-files.
+        "/env-files",
+        # F-05: shell into a container, and write to its filesystem.
+        "/exec",
+        "/exec/run",
+        "/files",
+        "/files/chown",
+        # Lists Dockhand's own filesystem.
+        "/system/files",
+        # Hawser agent tokens, backups and restore, secret providers, registries.
+        "/hawser",
+        "/backup",
+        "/restore",
+        "/secret-providers",
+        "/registries",
+        # Prune is destructive and has no HITL line in any manifest.
+        "/prune",
     ],
 )
 def test_no_forbidden_route_is_reachable(forbidden):
@@ -518,7 +535,9 @@ def test_no_forbidden_route_is_reachable(forbidden):
 def test_route_surface_matches_the_declared_allowlist():
     """A new route must be added here deliberately, with the security question asked."""
     expected = {
-        "/api/activity?limit={min(limit, 100)}&offset={offset}",
+        "/api/activity",
+        "/api/activity/stats",
+        "/api/auto-update/{container_name}",
         "/api/containers",
         "/api/containers/batch-update",
         "/api/containers/check-updates",
@@ -526,17 +545,30 @@ def test_route_surface_matches_the_declared_allowlist():
         "/api/containers/{container_id}",
         "/api/containers/{container_id}/logs",
         "/api/containers/{container_id}/stats",
+        "/api/containers/{container_id}/version-notes",
         "/api/containers/{container_id}/{action}",
+        "/api/containers/{container}",
         "/api/health",
         "/api/host",
         "/api/images",
         "/api/images/scan",
         "/api/jobs/{job_id}",
         "/api/networks",
+        "/api/scheduled-actions/{container_name}",
+        "/api/schedules",
+        "/api/schedules/executions",
+        "/api/stack-stats",
         "/api/stacks",
         "/api/stacks/{stack_name}/compose",
+        "/api/stacks/{stack_name}/deploys",
+        "/api/stacks/{stack_name}/deploys/{run_id}",
+        "/api/stacks/{stack_name}/deploys/{run_id}/log",
+        "/api/stacks/{stack_name}/validate",
         "/api/stacks/{stack_name}/{action}",
+        "/api/system/disk",
         "/api/volumes",
+        "/api/vulnerabilities",
+        "/api/vulnerabilities/count",
     }
     assert _route_literals() == expected
 

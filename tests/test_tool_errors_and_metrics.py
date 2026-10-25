@@ -55,6 +55,19 @@ ALL_TOOLS = [
     ("list_networks", {}),
     ("get_pending_updates", {}),
     ("get_host_info", {}),
+    # 1.0.55 read surface (dockhand-2026-10 p2).
+    ("get_stack_stats", {}),
+    ("get_disk_usage", {}),
+    ("get_vulnerability_summary", {}),
+    ("list_stack_deploys", {"stack_name": "searxng"}),
+    ("get_stack_deploy_log", {"stack_name": "searxng", "run_id": 7}),
+    ("get_version_notes", {"container_id": "abc123", "versions": "1.2.3"}),
+    ("list_schedules", {}),
+    ("get_schedule_executions", {}),
+    ("get_activity_stats", {}),
+    ("get_scheduled_actions", {"container_name": "nginx"}),
+    ("get_auto_update_policy", {"container_name": "nginx"}),
+    ("validate_stack", {"stack_name": "searxng", "compose": "services: {}"}),
 ]
 
 
@@ -318,6 +331,45 @@ async def test_every_tool_emits_exactly_one_metric(mock_env, collect_metrics):
         mock.get("/api/host").mock(return_value=httpx.Response(200, json={"hostname": "forge"}))
         mock.get(f"/api/jobs/{JOB_QUEUED['jobId']}").mock(
             return_value=httpx.Response(200, json=JOB_DONE_SUCCESS)
+        )
+        # 1.0.55 read surface.
+        mock.get("/api/stack-stats").mock(return_value=httpx.Response(200, json=[]))
+        mock.get("/api/system/disk").mock(
+            return_value=httpx.Response(200, json={"diskUsage": None})
+        )
+        mock.get("/api/vulnerabilities/count").mock(
+            return_value=httpx.Response(200, json={"total": 0, "summary": {}})
+        )
+        mock.get("/api/vulnerabilities").mock(
+            return_value=httpx.Response(200, json={"findings": [], "total": 0})
+        )
+        mock.get("/api/stacks/searxng/deploys").mock(
+            return_value=httpx.Response(200, json={"runs": []})
+        )
+        mock.get("/api/stacks/searxng/deploys/7").mock(
+            return_value=httpx.Response(200, json={"id": 7, "environmentId": 1})
+        )
+        mock.get("/api/stacks/searxng/deploys/7/log").mock(
+            return_value=httpx.Response(200, text="ok\n")
+        )
+        mock.get("/api/containers/abc123/version-notes").mock(
+            return_value=httpx.Response(200, json={"notes": []})
+        )
+        mock.get("/api/schedules").mock(return_value=httpx.Response(200, json={"schedules": []}))
+        mock.get("/api/schedules/executions").mock(
+            return_value=httpx.Response(200, json={"executions": [], "total": 0})
+        )
+        mock.get("/api/activity/stats").mock(
+            return_value=httpx.Response(200, json={"total": 0, "today": 0})
+        )
+        mock.get("/api/scheduled-actions/nginx").mock(
+            return_value=httpx.Response(200, json={"enabled": False})
+        )
+        mock.get("/api/auto-update/nginx").mock(
+            return_value=httpx.Response(200, json={"enabled": False})
+        )
+        mock.post("/api/stacks/searxng/validate").mock(
+            return_value=httpx.Response(200, json={"findings": [], "counts": {}})
         )
 
         for tool_name, kwargs in ALL_TOOLS:
