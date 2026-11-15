@@ -156,6 +156,32 @@ async def test_list_containers_compact_tolerates_missing_fields(mock_env):
     assert result["summary"]["total"] == 2
     assert result["containers"][0]["name"] == "bare"
     assert result["containers"][1]["stack"] is None
+    assert result["summary"]["malformed"] == 1
+    assert "1 of 3" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_list_containers_all_rows_malformed_is_not_silently_empty(mock_env):
+    """A response-shape change must not read as "no containers"."""
+    rows = ["a", ["b"], 3]
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers").mock(return_value=httpx.Response(200, json=rows))
+        result = await server.list_containers()
+
+    assert result["containers"] == []
+    assert result["summary"] == {"total": 0, "running": 0, "malformed": 3}
+    assert "Dockhand API response shape" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_list_containers_well_formed_has_no_malformed_key(mock_env):
+    rows = [_big_container(0)]
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers").mock(return_value=httpx.Response(200, json=rows))
+        result = await server.list_containers()
+
+    assert "malformed" not in result["summary"]
+    assert "warning" not in result
 
 
 @pytest.mark.asyncio

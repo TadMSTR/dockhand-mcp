@@ -309,12 +309,23 @@ async def list_containers(
         resp, duration = await _timed_get(client, "/api/containers", params={"env": env})
         data = json_body(resp)
         containers = data if isinstance(data, list) else data.get("containers", [])
-        containers = [c for c in containers if isinstance(c, dict)]
+        rows = containers
+        containers = [c for c in rows if isinstance(c, dict)]
+        # Rows that are not objects mean Dockhand's response shape changed. Count them,
+        # so a short list is not mistaken for "no containers".
+        malformed = len(rows) - len(containers)
         total = len(containers)
         running = sum(
             1 for c in containers if (c.get("state") or c.get("status") or "").lower() == "running"
         )
         result: dict[str, Any] = {"summary": {"total": total, "running": running}}
+        if malformed:
+            result["summary"]["malformed"] = malformed
+            result["warning"] = (
+                f"{malformed} of {len(rows)} Dockhand rows were not objects and were skipped; "
+                "the Dockhand API response shape may have changed"
+            )
+            log.warning("list_containers.malformed_rows", malformed=malformed, rows=len(rows))
         if names:
             wanted = set(names)
             result["containers"] = [c for c in containers if c.get("name") in wanted]

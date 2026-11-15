@@ -10,7 +10,9 @@
   `detail=true` returns the full rows, and `names=[...]` returns full rows for just those
   containers, with unknown names under `not_found`, as `list_stacks` does. A caller that read
   `id`, `status` or `labels` from the default output must now pass `detail=true`; that is
-  why this is a minor release.
+  why this is a minor release. Rows that are not JSON objects (a Dockhand response-shape
+  change) are counted in `summary.malformed`, with a `warning` and a log line, instead of
+  being dropped silently.
 
 ### Security
 - `cryptography` floor raised to 50.0.0 (vikunja#1256). The lock already held 50.0.2.
