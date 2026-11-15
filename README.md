@@ -12,7 +12,7 @@ Gives an AI agent structured access to Docker container and stack management on 
 | Tool | Description |
 |------|-------------|
 | `get_health` | Dockhand health status and timestamp |
-| `list_containers` | All containers: name, image, status, environment |
+| `list_containers` | Containers, **compact by default**: name, state, image, stack, and any restart count. `detail=true` or `names=[...]` for full rows |
 | `list_stacks` | Compose stacks, **compact by default**: status, health, counts, and each container's name/service/state. `detail=true` or `names=[...]` for full rows |
 | `list_images` | All images: id, tags, size, created |
 | `list_volumes` | All volumes: name, driver, mountpoint, labels |

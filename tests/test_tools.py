@@ -78,6 +78,86 @@ async def test_list_containers_sends_env_and_counts_running(mock_env):
         assert result["summary"]["running"] == 2  # two running, one exited
 
 
+def _big_container(i: int) -> dict:
+    """A row shaped like Dockhand 1.0.55's /api/containers (vikunja#1244)."""
+    return {
+        "id": f"{i:064x}",
+        "name": f"svc-{i}",
+        "image": f"example/img-{i}:1.0",
+        "imageId": "sha256:" + "0" * 64,
+        "state": "running",
+        "status": "Up 2 days (healthy)",
+        "created": 1760000000,
+        "ports": [{"PrivatePort": 8080, "Type": "tcp"}],
+        "networks": {"stack_default": {"ipAddress": "172.18.0.2"}},
+        "restartCount": 0,
+        "exitCode": 0,
+        "mounts": [{"Source": "/data", "Destination": "/data"}],
+        "labels": {
+            "com.docker.compose.project": f"stack-{i % 7}",
+            "com.docker.compose.service": f"svc-{i}",
+            **{f"org.example.label{j}": "x" * 40 for j in range(12)},
+        },
+        "command": "/entrypoint.sh " + "--flag value " * 50,
+        "systemContainer": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_containers_compact_by_default(mock_env):
+    rows = [_big_container(i) for i in range(100)]
+    rows[3]["restartCount"] = 4
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers").mock(return_value=httpx.Response(200, json=rows))
+        result = await server.list_containers()
+
+    assert len(json.dumps(result)) < 10_000
+    assert len(json.dumps(rows)) > 100_000  # the fixture is the size problem
+    first = result["containers"][0]
+    assert first == {
+        "name": "svc-0",
+        "state": "running",
+        "image": "example/img-0:1.0",
+        "stack": "stack-0",
+    }
+    assert result["containers"][3]["restartCount"] == 4
+    assert result["summary"] == {"total": 100, "running": 100}
+
+
+@pytest.mark.asyncio
+async def test_list_containers_detail_returns_full_rows(mock_env):
+    rows = [_big_container(i) for i in range(3)]
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers").mock(return_value=httpx.Response(200, json=rows))
+        result = await server.list_containers(detail=True)
+
+    assert result["containers"] == rows
+
+
+@pytest.mark.asyncio
+async def test_list_containers_names_filter_and_not_found(mock_env):
+    rows = [_big_container(i) for i in range(3)]
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers").mock(return_value=httpx.Response(200, json=rows))
+        result = await server.list_containers(names=["svc-1", "nope"])
+
+    assert result["containers"] == [rows[1]]
+    assert result["not_found"] == ["nope"]
+    assert result["summary"]["total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_list_containers_compact_tolerates_missing_fields(mock_env):
+    rows = [{"name": "bare"}, "not-a-dict", {"id": None, "labels": "junk"}]
+    with respx.mock(base_url=ENDPOINT) as mock:
+        mock.get("/api/containers").mock(return_value=httpx.Response(200, json=rows))
+        result = await server.list_containers()
+
+    assert result["summary"]["total"] == 2
+    assert result["containers"][0]["name"] == "bare"
+    assert result["containers"][1]["stack"] is None
+
+
 @pytest.mark.asyncio
 async def test_list_stacks_no_env_returns_error_and_makes_no_call(monkeypatch):
     """With no arg and no DOCKHAND_DEFAULT_ENV, the tool returns a clear error and

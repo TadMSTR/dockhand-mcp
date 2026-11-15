@@ -1,6 +1,25 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.0] — 2026-11-15
+
+### Changed
+- **`list_containers` is compact by default** (vikunja#1244). It returned every Dockhand
+  row whole, labels and command line included: 112 containers came to about 200k
+  characters, past the tool-result limit. The default row is now name, state, image, compose
+  stack (from the `com.docker.compose.project` label) and a non-zero `restartCount`.
+  `detail=true` returns the full rows, and `names=[...]` returns full rows for just those
+  containers, with unknown names under `not_found`, as `list_stacks` does. A caller that read
+  `id`, `status` or `labels` from the default output must now pass `detail=true`; that is
+  why this is a minor release.
+
+### Security
+- `cryptography` floor raised to 50.0.0 (vikunja#1256). The lock already held 50.0.2.
+- New floors for two transitive advisories: `dnspython>=2.9.2` (CVE-2026-128089) and
+  `opentelemetry-api>=1.45.2` (CVE-2026-126360). The lock moves dnspython 2.9.0 → 2.9.2 and
+  opentelemetry-api and -sdk 1.45.1 → 1.45.2 (semantic-conventions 0.66b1 → 0.66b2 with them).
+- CI installs uv with the SHA-pinned `astral-sh/setup-uv` at an exact version, replacing
+  `pip install uv==0.11.18`, which was pinned by version only (vikunja#1246, DH-10). Removes
+  that `SECURITY[deferred]` marker.
 
 ### Added
 - `ecosystem.config.js` defines a second PM2 app, `dockhand-mcp-fleet` (127.0.0.1:8510), pinned to
