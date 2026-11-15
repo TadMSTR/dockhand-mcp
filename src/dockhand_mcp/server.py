@@ -264,14 +264,44 @@ async def get_health() -> dict:
         return _tool_error("get_health", e)
 
 
-@mcp.tool
-async def list_containers(environment_id: str | int | None = None) -> dict:
-    """List all Docker containers managed by Dockhand.
+def _compact_container(container: dict) -> dict:
+    """One list_containers row without labels, command, mounts, networks and ports.
 
-    Returns container name, image, status, and environment for each container.
+    Dockhand 1.0.55 rows carry every compose label and the full command line:
+    112 containers came to 200,273 characters (vikunja#1244), past the
+    tool-result limit. The stack name comes from the compose project label.
+    """
+    labels = container.get("labels")
+    labels = labels if isinstance(labels, dict) else {}
+    row = {
+        "name": container.get("name"),
+        "state": container.get("state"),
+        "image": container.get("image"),
+        "stack": labels.get("com.docker.compose.project"),
+    }
+    if container.get("restartCount"):
+        row["restartCount"] = container["restartCount"]
+    return row
+
+
+@mcp.tool
+async def list_containers(
+    environment_id: str | int | None = None,
+    detail: bool = False,
+    names: list[str] | None = None,
+) -> dict:
+    """List Docker containers managed by Dockhand.
+
+    Compact by default: per container, its name, state, image, compose stack,
+    and restart count when non-zero. The full Dockhand row (id, status text,
+    labels, command, mounts, networks, ports) is large — about 200k characters
+    for 112 containers — so ask for it only where you need it.
 
     Args:
         environment_id: Dockhand environment ID. Defaults to DOCKHAND_DEFAULT_ENV.
+        detail: Return full Dockhand rows for every container. Large.
+        names: Return full rows for just these containers. Names that do not
+            exist are listed under ``not_found``.
     """
     try:
         client = get_client()
@@ -279,17 +309,44 @@ async def list_containers(environment_id: str | int | None = None) -> dict:
         resp, duration = await _timed_get(client, "/api/containers", params={"env": env})
         data = json_body(resp)
         containers = data if isinstance(data, list) else data.get("containers", [])
+        rows = containers
+        containers = [c for c in rows if isinstance(c, dict)]
+        # Rows that are not objects mean Dockhand's response shape changed. Count them,
+        # so a short list is not mistaken for "no containers".
+        malformed = len(rows) - len(containers)
         total = len(containers)
         running = sum(
             1 for c in containers if (c.get("state") or c.get("status") or "").lower() == "running"
         )
-        log.info("list_containers", total=total, running=running, duration_s=round(duration, 3))
+        result: dict[str, Any] = {"summary": {"total": total, "running": running}}
+        if malformed:
+            result["summary"]["malformed"] = malformed
+            result["warning"] = (
+                f"{malformed} of {len(rows)} Dockhand rows were not objects and were skipped; "
+                "the Dockhand API response shape may have changed"
+            )
+            log.warning("list_containers.malformed_rows", malformed=malformed, rows=len(rows))
+        if names:
+            wanted = set(names)
+            result["containers"] = [c for c in containers if c.get("name") in wanted]
+            result["not_found"] = sorted(wanted - {c.get("name") for c in result["containers"]})
+        elif detail:
+            result["containers"] = containers
+        else:
+            result["containers"] = [_compact_container(c) for c in containers]
+        log.info(
+            "list_containers",
+            total=total,
+            running=running,
+            detail=bool(detail or names),
+            duration_s=round(duration, 3),
+        )
         await emit_metric(
             "dockhand_tool",
             {"tool": "list_containers"},
             {"duration_s": duration, "total": total, "running": running},
         )
-        return {"containers": containers, "summary": {"total": total, "running": running}}
+        return result
     except (DockhandError, DockhandConfigError) as e:
         return _tool_error("list_containers", e)
 

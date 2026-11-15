@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dockhand-mcp"
-version = "0.8.0"
+version = "0.9.0"
 description = "FastMCP Python MCP server wrapping the Dockhand REST API"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,13 +24,15 @@ dependencies = [
     # version, and so the pip-audit CI gate has something to hold the line at.
     # Drop an entry once fastmcp's own floor is at or above it.
     "anyio>=4.14.2",            # PYSEC-2026-4024/4025
-    "cryptography>=49.0.0",     # PYSEC-2026-3552/3553/3554, GHSA-537c-gmf6-5ccf
+    "cryptography>=50.0.0",     # PYSEC-2026-3552/3553/3554, GHSA-537c-gmf6-5ccf; 50 per vikunja#1256
     "joserfc>=1.6.8",           # PYSEC-2026-2528
     "PyJWT>=2.15.0",            # PYSEC-2026-4140..4152, CVE-2026-102275
     "urllib3>=2.8.0",           # PYSEC-2026-4175/4176/4177
     "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j
     "python-multipart>=0.0.31",  # PYSEC-2026-3036/3037/3040
     "starlette>=1.3.1",         # PYSEC-2026-248/249
+    "dnspython>=2.9.2",         # CVE-2026-128089 (via email-validator)
+    "opentelemetry-api>=1.45.2",  # CVE-2026-126360
 ]
 
 [project.optional-dependencies]
